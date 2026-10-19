@@ -9,7 +9,7 @@ covers:
   - packages/chat/src/neobot_chat/providers/
   - packages/chat/src/neobot_chat/schema/exceptions.py
 verified_against: 5d6c775
-verified_hash: 0427690437b2
+verified_hash: 61023936177b
 ---
 
 # 05 模型路由与降级：角色/编号路由 · 原生视觉回退 · 计费与统计
@@ -520,6 +520,9 @@ flowchart TD
 | debug 分片文件 | `DebugRecorder._write_jsonl` | `prune_expired`（保留 10 天，每小时最多一次） | 写盘异常不在 `_write_jsonl` 内吞掉（`debug.py:148`） |
 
 ## 易错点
+
+* `UsageTracker` 新增 `record_api_call(module=web_search_api)`：搜索/抓取不是模型条目，不走注册表查找，金额由配置单价折算；`_VALID_MODULES` 已加入该模块名。
+
 
 * **两层路由不是「角色 -> key」**：`[agent_model]` 只给编号，编号再经 `AGENT_ROLE_NAMES`
   映射成角色名，最后才由 `[models.assignments]` 给出 key。只改编号不改 assignments，

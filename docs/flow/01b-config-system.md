@@ -5,7 +5,7 @@ covers:
   - app/src/neobot_app/runtime/hot_reload_registry.py
   - app/src/neobot_app/bootstrap/_config.py
 verified_against: 2a86224
-verified_hash: aa7a1cc5c05d
+verified_hash: 95ba4fd6e780
 ---
 
 # 01b 配置系统：schema 分层 · 加载校验 · 默认值回落 · 热重载边界
@@ -397,6 +397,9 @@ flowchart TD
 | 面板表单里的密钥空串 | 面板 `read()` 掩码后回传 | `_restore_masked_secrets` 在保存时还原｜`config_manager.py:1002` | 用户以为清空了其实没清；要清空只能用 TOML 原文模式 |
 
 ## 易错点
+
+* 新增嵌套段 `[web_search.api]`（19 字段）：`WebSearchConfig.api` 是 dataclass 嵌套字段，面板表单与 TOML 自动生成；`engines` 默认值已改为 `[deepseek, bing, duckduckgo]`。
+
 
 * **「必须项缺失」不会拦启动**：missing_required 只打 warning，随后被默认值/类型占位符补全并写回
   （`manager.py:606`）。配置里少写一整段，结果是「用默认值悄悄跑起来」。

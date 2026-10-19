@@ -5,7 +5,7 @@ covers:
   - app/src/neobot_app/observability/
   - app/src/neobot_app/cache/
 verified_against: 5d6c775
-verified_hash: 024f819d83c9
+verified_hash: 6b7bef321ab7
 ---
 
 # 23 计费、用量统计与可观测性
@@ -277,6 +277,9 @@ flowchart TD
 | DebugRecorder 文件 | `record_*` 写入 | `prune_expired`（写入时被动触发） | 无定时器，长期无事件则不清理 |
 
 ## 易错点
+
+* 新增按次计费入口：`UsageTracker.record_api_call`（`module=web_search_api`，token 恒 0，`cost_source=builtin`），由装配期回调用 `set_cost_recorder` 注入到 `web_search.deepseek_api`，避免 web_search 反向依赖 statistics。
+
 
 * **`_VALID_MODULES` 是闭集且 5 个模块无写入点**：新增能力要记账，必须同时加白名单**和**调用点，
   否则 `record` 静默丢弃（只 debug 日志）。

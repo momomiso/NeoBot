@@ -72,6 +72,7 @@ __all__ = [
     "results_domains",
     "tokens",
     "url_is_real",
+    "validate_api_results",
     "validate_results",
     "visible_text",
 ]
@@ -536,6 +537,107 @@ def validate_results(
     }
     return ValidationReport(valid=valid, reason="ok" if valid else reasons[0], signals=signals)
 
+
+def validate_api_results(
+    query: str,
+    results: Sequence[Any] | Iterable[Any] | None,
+    *,
+    min_rerank_score: float = 1.5,
+    coverage_threshold: float | None = None,
+) -> ValidationReport:
+    """校验结构化搜索 API（DeepSeek /v1/tools/search）的结果集。
+
+    与 validate_results 的**刻意差异**（不要“统一”掉）：
+
+    1. 不套 HTML 病理信号（li.b_algo、壳页、验证码、乱码）——结构化响应没有 SERP，
+       套用只会误杀；
+    2. C3 相关性只记 warnings，**不判失败**：API 侧已做语义重排，本地的 2-gram
+       覆盖率对中文长查询本就偏低（阈值 0.29 是给 HTML 兜底设的）；
+    3. 失败判据只留两条硬信号：空结果、可解真实 URL 比例 < URL_OK_RATIO
+       （后者防的是上游返回脏 URL / 未解壳链接）；
+    4. 质量分（rerank_score / authority）不足时只产出 degraded 结论，
+       由引擎写进响应，不清空结果。
+
+    返回的 ValidationReport 里 signals["degraded"] 表示“可用但质量一般”，
+    signals["warnings"] 列出全部非致命提示。
+    """
+    rows = list(results or ())
+    threshold = COVERAGE_THRESHOLD if coverage_threshold is None else float(coverage_threshold)
+    n = len(rows)
+
+    urls = [_row_url(row) for row in rows]
+    texts = [_row_text(row) for row in rows]
+    covs = [coverage(query, text) for text in texts]
+    cov_max = max(covs) if covs else 0.0
+    cov_top3 = max(covs[:3]) if covs else 0.0
+    url_ok = sum(1 for url in urls if url_is_real(url))
+    url_ok_ratio = (url_ok / n) if n else 0.0
+
+    scores: list[float] = []
+    authorities: list[int] = []
+    for row in rows:
+        raw_score = _field(row, "rerank_score")
+        if raw_score is not None:
+            try:
+                scores.append(float(raw_score))
+            except (TypeError, ValueError):
+                pass
+        raw_authority = _field(row, "authority")
+        if raw_authority is not None:
+            try:
+                authorities.append(int(raw_authority))
+            except (TypeError, ValueError):
+                pass
+    low_rerank = sum(1 for score in scores if score < min_rerank_score)
+    high_authority = sum(1 for authority in authorities if authority >= 3)
+    unknown_authority = sum(1 for authority in authorities if authority < 0)
+
+    codes: list[str] = []
+    reasons: list[str] = []
+    warnings: list[str] = []
+
+    def _fail(code: str, detail: str) -> None:
+        if code not in codes:
+            codes.append(code)
+        reasons.append(f"{code}: {detail}")
+
+    if n == 0:
+        _fail("no_results", "结果列表为空")
+    elif url_ok_ratio < URL_OK_RATIO:
+        _fail("url_ok_ratio", f"可解真实 URL 比例 {url_ok_ratio:.2f} < {URL_OK_RATIO}")
+
+    if n and cov_max < threshold:
+        warnings.append(f"cov_max={cov_max:.2f} < {threshold}")
+    if low_rerank:
+        warnings.append(f"low_rerank={low_rerank}")
+    if n and unknown_authority == n:
+        warnings.append("authority_unknown")
+
+    valid = not codes
+    degraded = bool(warnings)
+    confidence = "rejected" if not valid else ("high" if cov_max >= HIGH_CONFIDENCE else "low")
+
+    signals: dict[str, Any] = {
+        "channel": "api",
+        "query": str(query or ""),
+        "n": n,
+        "url_real": url_ok,
+        "url_ok_ratio": round(url_ok_ratio, 3),
+        "cov_max": round(cov_max, 3),
+        "cov_top3": round(cov_top3, 3),
+        "threshold": threshold,
+        "rerank_max": round(max(scores), 3) if scores else 0.0,
+        "min_rerank_score": float(min_rerank_score),
+        "low_rerank": low_rerank,
+        "high_authority": high_authority,
+        "unknown_authority": unknown_authority,
+        "degraded": degraded,
+        "warnings": warnings,
+        "confidence": confidence,
+        "codes": codes,
+        "reasons": reasons,
+    }
+    return ValidationReport(valid=valid, reason="ok" if valid else reasons[0], signals=signals)
 
 def judge_results(
     query: str,

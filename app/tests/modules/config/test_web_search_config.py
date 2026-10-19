@@ -18,7 +18,7 @@ def test_defaults_are_passed_through() -> None:
 
     result = _web_search_config_dict(config)
 
-    assert result["engines"] == ["bing", "duckduckgo"]
+    assert result["engines"] == ["deepseek", "bing", "duckduckgo"]
     assert result["browser_fallback"] is True
     assert result["browser_timeout_seconds"] == 8.0
     assert result["max_rounds"] == 5
@@ -54,7 +54,7 @@ def test_schema_defaults_are_typed() -> None:
     section = WebSearchConfig()
     # 默认搜索源**写死在 schema 里**，而不是留 None 靠 SearchManager 兜底：
     # 这样面板、配置参考与审计脚本看到的就是真实生效的值（两者语义本就相同）
-    assert section.engines == ["bing", "duckduckgo"]
+    assert section.engines == ["deepseek", "bing", "duckduckgo"]
     assert section.browser_fallback is True
     assert section.browser_timeout_seconds == 8.0
     assert section.engine_timeout_seconds is None

@@ -13,7 +13,7 @@ covers:
   - app/src/neobot_app/runtime/process_stop.py
   - app/src/neobot_app/runtime/connection_readiness.py
 verified_against: d37eae4
-verified_hash: e308acda5e0a
+verified_hash: 72ac2a84507e
 ---
 
 # 01 启动装配 / 停机 / 软重启 / 待机
@@ -631,6 +631,9 @@ flowchart TD
 | `_CONFIG_ERROR` | `_load_config_or_defaults` 失败 | 下一次加载成功 | 非空即强制 `start_in_standby`，且默认配置不进缓存 |
 
 ## 易错点
+
+* 装配顺序新增一步：`config` 加载完成后立即 `apply_web_search_config(config)`，把 `[web_search.api]` 落到 `web_search.deepseek_api` 的进程级配置；它必须在任何一次搜索之前完成，否则第一次查询会用默认（无 Key）配置。
+
 
 * **超时不是许可**。`_drain_shutdown_task` / `_wait_stage` /
   `_stop_adapter_with_timeout` 三处都是「先报错、再继续等」；取消或超时都不代表组件已停，

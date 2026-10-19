@@ -126,6 +126,21 @@ class SearchManager:
 
         sem = self._global_semaphore
 
+        # 可选通道（如 deepseek）可能整体不可用：没配 Key / 已熔断 / 通道关闭。
+        # 这种情况**不发请求、不算失败**，由上层记成 unavailable 级并继续下一级。
+        available = getattr(eng, "available", None)
+        if callable(available) and not available():
+            reason_of = getattr(eng, "unavailable_reason", None)
+            reason = reason_of() if callable(reason_of) else "通道不可用"
+            return SearchResponse(
+                query=query,
+                results=[],
+                engine=engine_name,
+                error=reason,
+                degraded=True,
+                signals={"available": False},
+            )
+
         last_error: Optional[str] = None
         attempts = 0
         degraded = False
@@ -151,6 +166,10 @@ class SearchManager:
                 # 不能因为 results 非空就当成功（fix(9) 回退条件修正）。
                 last_error = resp.error or "引擎返回空结果"
                 degraded = degraded or resp.degraded
+                # 永久失败（400/401/402/403/404/413）与预算耗尽：重试没有意义，
+                # 还会放大账单，直接交回上层换通道。
+                if (resp.signals or {}).get("permanent") or (resp.signals or {}).get("budget_exceeded"):
+                    break
             except Exception as e:
                 attempts += 1
                 last_error = f"{type(e).__name__}: {e}"
@@ -197,6 +216,13 @@ class SearchManager:
                 attempts += 1
                 stages.append({"stage": name, "kind": "network", "reason": f"超过预算 {budget:g}s"})
                 errors.append(f"{name}: 超过预算 {budget:g}s")
+                return None
+            if (resp.signals or {}).get("available") is False:
+                # 可选通道未配置/已熔断：不发请求、不算尝试，只留一条 unavailable 痕迹。
+                stages.append(
+                    {"stage": name, "kind": "unavailable", "reason": str(resp.error or "")[:160]}
+                )
+                # 未配置/熔断不算降级：出厂没配 Key 的部署不应让每次搜索都标 degraded。
                 return None
             attempts += max(1, int(getattr(resp, "attempts", 1) or 1))
             kind = (resp.signals or {}).get("failure")

@@ -11,17 +11,23 @@ import httpx
 
 from neobot_app.agent_tools.contracts import AgentToolError, ToolContext, tool_definition
 from neobot_app.utils.ssrf import validate_public_url_async
+from neobot_app.web_search.config_section import session_kwargs
 from neobot_app.web_search.session import SearchSession
 
 
 class WebTools:
     def __init__(self, *, timeout: float = 30, max_bytes: int = 512_000,
                  max_text: int = 64_000, max_sources: int = 30,
-                 search_factory: Any = SearchSession, client_factory: Any = httpx.AsyncClient) -> None:
+                 search_factory: Any = SearchSession, client_factory: Any = httpx.AsyncClient,
+                 web_search_config: dict[str, Any] | None = None) -> None:
         if timeout <= 0 or min(max_bytes, max_text, max_sources) < 1:
             raise ValueError("Web tool budgets must be positive")
         self.timeout, self.max_bytes, self.max_text = timeout, max_bytes, max_text
-        self.max_sources = max_sources
+        # [web_search] 段此前到不了主 Agent（runtime.py 里 WebTools() 不带参数），
+        # engines 改了也不生效；这里接住配置，并把 preview_pages_limit 当作来源条数上限。
+        self.web_search_config = dict(web_search_config or {})
+        limit = self.web_search_config.get("preview_pages_limit")
+        self.max_sources = int(limit) if isinstance(limit, int) and limit > 0 else max_sources
         self.search_factory, self.client_factory = search_factory, client_factory
 
     def definitions(self) -> list[dict]:
@@ -56,7 +62,7 @@ class WebTools:
 
         async def search(query: str) -> Any:
             # Each query owns its result indices and history; no cross-chat state.
-            session = self.search_factory()
+            session = self.search_factory(**session_kwargs(self.web_search_config))
             if mode:
                 return await session.research(query, modes=mode, num_results=10, total_result_limit=self.max_sources)
             return await session.search(query, num_results=10)

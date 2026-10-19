@@ -27,6 +27,16 @@ def build_usage_components(
         billing=billing,
     )
     initialize_usage_tracker(usage_tracker)
+
+    # 搜索/抓取 API 的按次记账：web_search 不依赖 statistics，回调在装配期注入。
+    # 未装配（纯单元测试）时 _cost_recorder 为 None，引擎照常工作、只是不落库。
+    from neobot_app.web_search import deepseek_api
+
+    async def _record_search_cost(cost: float) -> None:
+        await usage_tracker.record_api_call(cost_cny=cost)
+
+    deepseek_api.set_cost_recorder(_record_search_cost)
+
     report_service = UsageReportService(
         usage_session_factory,
         logger=logger_factory.get_logger("app.usage_report"),

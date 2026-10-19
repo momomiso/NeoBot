@@ -59,6 +59,13 @@ DEFAULT_EAGER_TOOL_SKILLS = frozenset(
 )
 
 
+def _web_search_section(config: Any) -> dict[str, Any]:
+    """读取 [web_search] 段供 agent 工具使用（缺段时返回空 dict）。"""
+    from neobot_app.web_search.config_section import section_to_config_dict
+
+    return section_to_config_dict(getattr(config, "web_search", None))
+
+
 def build_all_skills(
     *,
     disabled_skills: list[str] | None = None,
@@ -416,6 +423,9 @@ def build_all_skills(
             credential_manager=credential_manager, provider=agent_provider,
             vision_provider=vision_provider, skill_manager=mgr, notification_hub=notification_hub,
             config=tools_config,
+            # [web_search] 段（含 engines 顺序）注入主 Agent 的工具面；
+            # 转换逻辑与 bootstrap 共用 web_search.config_section，避免两套默认值。
+            web_search_config=_web_search_section(config),
         )
         owner = AgentToolsSkill(runtime)
         mgr.register(owner)

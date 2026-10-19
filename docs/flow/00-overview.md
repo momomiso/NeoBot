@@ -8,7 +8,7 @@ covers:
   - app/src/neobot_app/message/
   - packages/adapter/src/neobot_adapter/
 verified_against: 2d7925b
-verified_hash: 6e54c27db45e
+verified_hash: 213efeb1180e
 ---
 
 # 00 全局视图：进程启动 -> 入站 -> 处理 -> 出站 -> 停机
@@ -254,6 +254,9 @@ flowchart TD
 | 回复管线状态机 | 事件管道 | 发送完成/取消/失败 | 终态 COMPLETED / FAILED / CANCELLED 无出边 |
 
 ## 易错点
+
+* `create_application` 启动期多了 `apply_web_search_config(config)`：搜索 API 的 Key/QPS/预算是进程级的，漏调等于「配了 Key 却不生效」，且日志上看不出来。
+
 
 * **入站帧必须先判 `dict`**：数组/字符串帧若直接入队会打死分发循环（见 `fix(13)`）；
   连接存活与分发循环存活是两条独立判据，别只看其中一条。

@@ -9,7 +9,7 @@ covers:
   - app/src/neobot_app/runtime/sandbox_maintenance.py
   - packages/chat/src/neobot_chat/skills/
 verified_against: 802eb41
-verified_hash: 6b4cb407be15
+verified_hash: dd8b02994f0f
 ---
 
 # 06 工具运行时与技能：注册 · native/PTC · 管理员凭据 · 沙箱裁决 · 维护 Agent
@@ -580,6 +580,9 @@ CLI 侧（`cli.py:558`）有同构的一份循环，两条路径共用同一套 
 | SandboxLock 持有者 | 无调用点 | 无 | 当前不参与任何裁决，不可依赖 |
 
 ## 易错点
+
+* 主 Agent 的 `WebTools` 现在通过 `AgentToolRuntime(web_search_config=...)` 接住 `[web_search]`（此前 `WebTools()` 不带参数，engines 改了不生效）；`web_search` 的会话参数由 `web_search.config_section.session_kwargs` 过滤后传入。
+
 
 * **技能持有视觉 provider，换模型要主动推**：`DrawingSkill`（看参考图）与 `ImageParseSkill`（解析图片）
   在启动期建好后一直持有 `_vision_provider` 且**真的在用**。热重载的 `skills` 消费者按

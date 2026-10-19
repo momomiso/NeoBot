@@ -32,6 +32,7 @@ _VALID_MODULES = frozenset({
     "agent:problem_solver",
     "agent:self_heal",
     "memory_compaction",
+    "web_search_api",
 })
 
 
@@ -222,6 +223,57 @@ class UsageTracker:
             cost=f"¥{cost:.6f}",
             cost_source=source,
             billing_ms=round(elapsed_ms, 3),
+        )
+
+
+    async def record_api_call(
+        self,
+        *,
+        module: str = "web_search_api",
+        cost_cny: float,
+        model_name: str = "deepseek-search",
+        provider_name: str = "DeepSeek",
+    ) -> None:
+        """按次记账：搜索/抓取这类「不是模型、但会产生费用」的调用。
+
+        与 record() 的区别：**不查模型注册表**（搜索不是模型条目），也没有 token 概念。
+        金额由调用方按 [web_search.api].price_per_1000_cny 折算后传入，
+        cost_source 固定 builtin（本地配置价，不来自供应商回执）。
+        """
+        if module not in _VALID_MODULES:
+            self._logger.debug("未知的用量统计模块，已跳过", module=module)
+            return
+
+        import datetime as _dt
+
+        occurred_at = _dt.datetime.now(_dt.timezone.utc)
+        record_obj = ModelUsageRecord(
+            module_name=module,
+            model_name=model_name,
+            provider_name=provider_name,
+            input_tokens=0,
+            output_tokens=0,
+            cache_hit_tokens=0,
+            cache_miss_tokens=0,
+            cost_cny=float(cost_cny),
+            cost_source=SOURCE_BUILTIN,
+            cost_detail=None,
+            conversation_kind=None,
+            conversation_id=None,
+            created_at=occurred_at,
+        )
+
+        async with self._session_factory() as session:
+            repo = SqlAlchemyUsageRepository(session)
+
+            async def _flush() -> None:
+                await repo.add(record_obj)
+                await session.commit()
+
+            await retry_on_lock(_flush, on_retry=session.rollback)
+
+        self._logger.debug(
+            "按次用量已记录", module=module, model=model_name, cost=f"¥{cost_cny:.6f}"
         )
 
 

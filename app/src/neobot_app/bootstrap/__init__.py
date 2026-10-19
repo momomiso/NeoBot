@@ -168,31 +168,29 @@ def plan_maintenance_run(
 _MAINTENANCE_RETRY_STATUSES = frozenset({"failed", "running"})
 
 
-def _web_search_config_dict(config: Any) -> dict[str, Any]:
-    """把 `[web_search]` 段转成 WebSearchExecutor 需要的 dict。
+def apply_web_search_config(config: Any) -> None:
+    """把 [web_search.api] 段应用为进程级 API 配置（启动与配置重载都要走）。
 
-    此前两处调用点都硬编码 `{}`，导致 `[web_search]` 段是**死配置**（fix(9) F5）：
-    引擎顺序、浏览器兜底、预算都改不动。这里按实测默认值补全：
-    duckduckgo 作为最后兜底给 15s（部署实测它慢），浏览器通道给 8s（实测单次约 1s）。
+    放在这里而不是装配期零散调用：搜索通道的凭证/限流/预算都是进程级的，
+    漏调一次就等于「配了 Key 却不生效」，而且这种漏很难从日志上看出来。
     """
-    section = getattr(config, "web_search", None)
-    if section is None:
-        return {}
-    engines = getattr(section, "engines", None)
-    result: dict[str, Any] = {
-        "engines": list(engines) if engines else ["bing", "duckduckgo"],
-        "max_rounds": int(getattr(section, "max_search_rounds", None) or 5),
-        "preview_pages_limit": int(getattr(section, "preview_pages_limit", None) or 30),
-        "variant_result_limit": int(getattr(section, "variant_result_limit", None) or 6),
-        "browser_fallback": bool(getattr(section, "browser_fallback", True)),
-        "browser_timeout_seconds": float(
-            getattr(section, "browser_timeout_seconds", None) or 8.0
-        ),
-    }
-    budgets = getattr(section, "engine_timeout_seconds", None)
-    if isinstance(budgets, dict) and budgets:
-        result["engine_budgets"] = {str(k): float(v) for k, v in budgets.items()}
-    return result
+    from neobot_app.web_search import deepseek_api
+
+    section = getattr(getattr(config, "web_search", None), "api", None)
+    deepseek_api.configure(section)
+
+
+def _web_search_config_dict(config: Any) -> dict[str, Any]:
+    """把 [web_search] 段转成 WebSearchExecutor 需要的 dict。
+
+    此前两处调用点都硬编码空 dict，导致 [web_search] 段是死配置（fix(9) F5）。
+    转换逻辑现在收敛在 web_search.config_section（bootstrap 与 skills 共用），
+    本函数只负责「顺便把 API 配置应用到进程级」——重载路径也会经过这里。
+    """
+    from neobot_app.web_search.config_section import section_to_config_dict
+
+    apply_web_search_config(config)
+    return section_to_config_dict(getattr(config, "web_search", None))
 
 
 def _register_billing_hot_reload_rule() -> None:
@@ -660,6 +658,7 @@ def create_application(*, owns_plugins: bool = True) -> NeoBotApplication:
     _run_once("loguru", lambda: configure_loguru(DATA_DIR / "logs", runtime_events=True))
     logger_factory = _reuse_or("logger_factory", LoguruLoggerFactory)
     config = _load_config_for_reuse()
+    apply_web_search_config(config)
 
     sync_data_files(SRC_DATA_DIR, DATA_DIR)
     sync_default_prompts(DATA_DIR, logger=logger_factory.get_logger("app.prompt"))
