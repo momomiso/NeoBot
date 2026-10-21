@@ -4,10 +4,10 @@ covers:
   - app/src/neobot_app/web_search/
   - app/src/neobot_app/web_search_package.py
 verified_against: 528fe18
-verified_hash: d394b6928778
+verified_hash: a8fe7d5e91bf
 ---
 
-# 10 联网搜索：HTTP(Bing) → 浏览器脚本化 → DuckDuckGo 三级回退
+# 10 联网搜索：DeepSeek API → HTTP(Bing) → 浏览器脚本化 → DuckDuckGo 四级回退
 
 ## 范围
 
@@ -56,7 +56,11 @@ flowchart TD
     E --> F{"current_round 大于等于 max_rounds（默认 5）?"}
     F -- "是" --> F1["degraded=True, engine=session<br/>error=已达到最大搜索轮次"]
     F -- "否" --> G["SearchManager.search_with_fallback<br/>num_results = min（n×2, 30）"]
-    G --> H["① for name in _engine_names（bing）→ _try 跑一级并记 stages"]
+    G --> H0{"⓪ engines 含 deepseek 且可用?<br/>（有 Key / 未熔断 / 未超预算 / 允许外发）"}
+    H0 -- "不可用：不发请求" --> H1["stages 记 unavailable，不算降级"]
+    H0 -- "可用" --> H2["DeepSeekSearchEngine.search<br/>POST /v1/tools/search → validate_api_results"]
+    H2 -- "success / empty / 判失败" --> J
+    H1 --> H["① for name in _engine_names（bing）→ _try 跑一级并记 stages"]
     H --> J{"本级结果"}
     J -- "success" --> Q["回程：过滤已读 → 多样性重排<br/>→ cap 20 → 全局编号"]
     J -- "signals.empty：页面明说没有结果" --> J2["短路返回空：error=None<br/>degraded=True, signals.empty=True"]
@@ -85,6 +89,7 @@ sequenceDiagram
     participant Exec as WebSearchExecutor
     participant Sess as SearchSession
     participant Mgr as SearchManager
+    participant DS as DeepSeekSearchEngine
     participant Bing as BingSearchEngine
     participant Br as BrowserSearchChannel
     participant DDG as DuckDuckGoSearchEngine
@@ -93,6 +98,21 @@ sequenceDiagram
     Exec->>Sess: research（mode 非空）或 search
     Sess->>Sess: 轮次检查 + fetch_count = min（n×2, 30）
     Sess->>Mgr: search_with_fallback（query, fetch_count）
+    alt ⓪ engines 含 deepseek 且 available() 为真
+        Mgr->>DS: search（query）—— 令牌桶 4 QPS（进程级，注入时钟可测）
+        DS->>DS: 日/会话预算 → 截断 query 到 128 码点、count 夹到 1..50
+        DS->>DS: POST /v1/tools/search（Bearer）→ 状态码分级
+        alt 402 / 401
+            DS->>DS: 熔断（402 长熔断 / 401 同）+ 管理员通知
+        else 408/429/5xx
+            DS->>DS: 退避重试（优先 Retry-After，≤2 次；连续 3 次 429 熔断）
+        end
+        DS->>DS: validate_api_results（C1 URL 比例；C3 仅 warning；低分只标 degraded）
+        DS->>DS: 成功则按次记账（module=web_search_api, cost=5/1000）
+        DS-->>Mgr: success / empty（短路）/ failure+permanent
+    else 不可用（无 Key / 熔断 / 关通道）
+        Mgr->>Mgr: 记 stages.kind=unavailable，不发请求、不算降级
+    end
     Mgr->>Mgr: _rate_limit（bing）：等满 min_delay 1.0s
     Mgr->>Bing: search（query）—— bing 未配预算，无 wait_for 包裹
     Bing->>Bing: 冷启动预热一次（首页 + 预热查询，结果丢弃）
@@ -452,29 +472,31 @@ flowchart TD
 ```mermaid
 flowchart TD
     subgraph 配置层
-      A1["WebSearchConfig｜config/schemas/bot.py:1579"]
+      A1["WebSearchConfig｜config/schemas/bot.py"]
       A2["enabled=True, preview_pages_limit=30, max_search_rounds=5"]
-      A3["variant_result_limit=6, engines=None"]
+      A3["engines 默认 [deepseek, bing, duckduckgo]"]
       A4["browser_fallback=True, browser_timeout_seconds=8.0"]
       A5["engine_timeout_seconds=None（不填时 duckduckgo 用 15s）"]
+      A6["api: WebSearchApiConfig（qps=4, 日限 1000, ¥5/1000 次）"]
     end
     subgraph 装配层
-      B1["_web_search_config_dict｜bootstrap/__init__.py:167"]
-      B2["两处调用点：:1092 与 :1108（自修复 Agent 装配）"]
-      B3["problem_solver.py:718 转发 browser_fallback / browser_timeout_seconds / engine_budgets"]
-      B4["self_heal.py:774 只转发 engines / max_rounds / preview / variant"]
+      B1["_web_search_config_dict → config_section.section_to_config_dict（单一来源）"]
+      B2["apply_web_search_config(config) → deepseek_api.configure（启动 + 重载）"]
+      B3["WebTools(web_search_config=...)：主 Agent 首次拿到 engines / 预算"]
+      B4["两处装配调用点（自修复 / 解题 Agent）继续复用同一份 dict"]
       B5["build_web_search_package｜web_search_package.py:229：遗留入口，无运行时调用点"]
     end
     subgraph 运行层
-      C1["WebSearchExecutor → SearchSession → SearchManager"]
-      C2["ENGINE_REGISTRY = bing / duckduckgo｜engine.py:431"]
-      C3["get_engine（name）：未知名字抛 ValueError｜:437"]
-      C4["_try 只捕 TimeoutError → 未知引擎名让整次搜索抛出而不是降级"]
+      C1["WebTools / WebSearchExecutor → SearchSession → SearchManager"]
+      C2["ENGINE_REGISTRY = bing / duckduckgo / deepseek（惰性注册）"]
+      C3["get_engine（name）：未命中 → import deepseek_api 再查一次｜engine.py:437"]
+      C4["可选通道 available()=False → stages 记 unavailable，不发请求、不算降级"]
     end
     A1 --> A2
     A2 --> A3
     A3 --> A4
     A4 --> A5
+    A5 --> A6
     A1 --> B1
     B1 --> B2
     B2 --> B3
@@ -488,14 +510,60 @@ flowchart TD
 
 * `_web_search_config_dict` 的注释记着 `fix(9)` F5：此前两处调用点硬编码 `{}`，
   导致 `[web_search]` 段是**死配置**（引擎顺序、浏览器兜底、预算都改不动）。
-* `WebSearchConfig.engines=None` 是默认值，`_web_search_config_dict` 把它补成
-  `["bing","duckduckgo"]`；`SearchManager` 再把 `duckduckgo` 抽到最后一级。
+* `WebSearchConfig.engines` 的默认值现在是 `["deepseek","bing","duckduckgo"]`；
+  `SearchManager` 仍把 `duckduckgo` 抽到最后一级。没配 Key 时 `deepseek` 在
+  `search()` 入口就被 `available()` 短路（零请求），不会给每次搜索加一条失败。
 * Bing 引擎**没有**配置入口：`get_engine(name)` 不带 kwargs，
   所以 `timeout=15.0`、`market=zh-CN`、`setlang=zh-Hans`、`warmup=True`、
   `structural_retry=True`、`structural_retry_delay=0.5` 全是硬编码默认值。
-* 已知的反直觉接线事实：`self_heal` 的执行器拿得到 `engines`，但拿不到
-  `browser_timeout_seconds` / `engine_timeout_seconds`（`:774` 那处没转发），
-  于是自修复链路用默认 8s 浏览器超时 + `session.py` 兜底的 DDG 15s。
+* `self_heal` 的执行器仍拿不到 `browser_timeout_seconds` / `engine_timeout_seconds`
+  （那处没转发），于是自修复链路用默认 8s 浏览器超时 + `session.py` 兜底的 DDG 15s。
+* 主 Agent 的 `WebTools` 现在接住了 `[web_search]`（engines / 预算 / 浏览器兜底），
+  `preview_pages_limit` 兼作「单次搜索来源条数上限」。
+</details>
+
+<details>
+### DeepSeek API 通道：第 ⓪ 级的请求形状、出口判据、预算与熔断
+
+```mermaid
+flowchart TD
+    A["search(query, num_results)｜deepseek_api.py"] --> B{"available()?<br/>enabled / allow_external_query / 有 Key / 未熔断"}
+    B -- "否" --> B1["failure(available=False)<br/>manager 记 stages.kind=unavailable"]
+    B -- "是" --> C{"预算: 日上限 + 会话上限"}
+    C -- "超限" --> C1["budget_exceeded=True（永久失败，不重试）"]
+    C -- "通过" --> D["截断 query≤128 码点 / count 夹到 1..50 / need_content"]
+    D --> E["令牌桶 4 QPS（进程级）→ POST /v1/tools/search"]
+    E --> F{"HTTP 状态"}
+    F -- "200" --> G["逐行映射 → normalize_result_url → validate_api_results"]
+    F -- "401/402" --> H["熔断 + 管理员通知（永久失败）"]
+    F -- "408/429/5xx" --> I["退避重试（Retry-After 优先，≤2 次）"]
+    F -- "400/403/404/413" --> J["永久失败，交上层换通道"]
+    G --> K{"results 为空?"}
+    K -- "是" --> K1["error=None + signals.empty（短路，不重试）"]
+    K -- "否" --> L{"C1: 可解 URL 比例 ≥ 0.8?"}
+    L -- "否" --> L1["判失败（structure），不计费"]
+    L -- "是" --> M["成功：按次记账 0.005 元<br/>低分/未知权威只标 degraded"]
+```
+
+* **判据不套 HTML**：API 通道不看 `li.b_algo` / 壳页 / 验证码 / 乱码；C3 只写进
+  `signals.warnings`。理由写在 `validate.validate_api_results` 的 docstring 里——
+  本地 2-gram 覆盖率对中文长查询本就偏低，硬判会把好结果杀掉。
+* **计费口径**：只有「200 且至少一条结果且通过 C1」才记账（`module=web_search_api`，
+  金额 = `price_per_1000_cny / 1000`）。失败、空结果、超时都不记，与官方计费一致。
+* **预算是请求数不是结果数**：`count` 不影响单价，但重试会各算一次；因此永久失败
+  必须 `permanent=True` 提前返回，否则 4xx 重试只会放大账单。
+* **熔断有两档**：402（余额不足）长熔断（默认 1h）、401（Key 无效）同档；
+  429 连续 3 次才熔断（默认 60s），单次 429 只退避——官方 QPS 抖动很常见。
+* **读页也走 API**：`read()` / `web_fetch` 按 `fetch_mode=api_first` 先试 `/v1/tools/fetch`，
+  拿到 Markdown 就标 `content_format=markdown` 并**跳过 ContentExtractor**（那是 HTML 抽取器）；
+  失败/空正文回落本地 httpx。两条路共用同一道「归一化 + 公网校验」闸门，
+  私网与带凭据 URL 在发出前就被拒。已读集合按「服务成功」登记，与走哪条路无关。
+* **研究模式默认 operators**：`research()` 不再并发 4 条变体，而是把 mode 展开成 1 条带
+  `site:` / `lang:` / `after:` 的查询（显式 `sites` 整体替换默认站点集；显式 `after` 覆盖
+  news 的 30 天窗）。这是「按请求计费」的直接对策；`variants` 仍保留用于对照与排障。
+* **状态在进程级**：`SearchApiRuntime` 持有 client / 令牌桶 / 熔断 / 预算；
+  引擎实例是每次查询新建的（`SearchSession` 每次 new），状态若挂在实例上会归零。
+  测试要 `deepseek_api.reset_runtime()` 或自建 runtime 注入 `httpx.MockTransport`。
 </details>
 
 <details>
@@ -576,8 +644,14 @@ flowchart TD
 | `_results_index`（全局编号） | `_reindex_results`（`start_idx = max(keys)+1`） | 只有重建 session | research 二次编号不清旧键 → 别名字段重复计数 |
 | `_read_urls`（已读集合） | `read` 中 `content_fetched=True` 的 URL | 重建 session | 壳页/空正文/乱码/SSRF 拦截都不置位，也不进集合 |
 | `resp.degraded / attempts / signals.stages` | 引擎置初值，manager 逐级回填 | 无（随响应对象） | 这是排障第一现场，但**没有**落盘到日志 |
+| `SearchApiRuntime`（client / 令牌桶 / 熔断 / 预算） | `get_runtime()` 懒建；`configure()` 丢弃重建 | `reset_runtime()`（测试）/ `aclose` | 进程级：挂在引擎实例上会在每次查询时归零 |
+| `breaker.open_until / consecutive_429` | 401/402 直接 trip；429 连续 3 次 trip | 成功响应 `record_success` 清零计数；到期自然过期 | 熔断期间 `available()=False` → 只记 unavailable，不发请求 |
+| `budget.used_today / per_scope` | `try_acquire` 在每次请求前自增 | 跨自然日（UTC）自动清零；`per_scope` 随日清零 | 超限返回 `budget_exceeded`（永久失败），manager 不再重试 |
+| `_cost_recorder / _notifier` | 装配期 `set_cost_recorder` / `set_notifier` 注入 | 无（进程级） | 未注入时：只记 debug / warning，不影响搜索 |
 
 ## 易错点
+
+* **配置热重载**：`WebSearchReloadConsumer`（`config_paths=("web_search","env")`）在重载时调 `deepseek_api.configure` 并刷新 `config_section` 活配置；工具面下一轮调用即用新配置，`web_search` 从「需重启」升级为「运行期生效」。
 
 * **"内容类失败不重试"只对引擎内部成立**：`SearchManager.search` 的重试与失败类型无关，
   所以 Bing 内容类失败实际会打 2 次请求；结构类失败叠加引擎内的 `structural_retry`
@@ -597,7 +671,11 @@ flowchart TD
   链路直接跳过浏览器级（不会报错，只是静默少一级）。
 * **`get_browser_channel` 的 kwargs 只在首次生效**：单例 key 固定，后来者传的
   `timeout_seconds` 被静默忽略；测试里要 `reset_browser_channel()` 才能换参数。
-* **未知引擎名会让整次搜索抛出**：`get_engine` 抛 `ValueError`（`engine.py:441`），
+* **API 通道的重试会与 manager 的重试叠加**：引擎内最多 `max_retries+1` 次（默认 3），
+  manager 再乘一次（默认 2）→ 最坏 6 次请求、6 次计费。要收敛就调 `[web_search.api].max_retries`
+  或给该引擎配 `engine_timeout_seconds` 预算，别只改一处。
+* **未知引擎名会让整次搜索抛出**：`get_engine` 先惰性 import deepseek（可选通道），
+  仍未命中才抛 `ValueError`（`engine.py:441`），
   而 `_try` 只捕获 `asyncio.TimeoutError` → 异常穿出 `search_with_fallback`、穿出
   `SearchSession`，最终变成工具层的 `[错误]` 而不是 `degraded` 响应。配置写错引擎名的表现就是它。
 * **两个引擎列表的边界**：`engines=["duckduckgo"]` 时该名字同时进 `_degraded_engines` 与

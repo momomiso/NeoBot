@@ -110,12 +110,27 @@ class SearchManager:
             except Exception:  # pragma: no cover - 关闭失败只记日志
                 logger.debug("关闭搜索引擎 %r 失败", engine, exc_info=True)
 
+    @staticmethod
+    def _supports(engine: Any, keyword: str) -> bool:
+        """引擎方法是否接受某个可选关键字（bing/DDG 不接受 need_content）。"""
+        import inspect
+
+        try:
+            parameters = inspect.signature(engine.search).parameters
+        except (TypeError, ValueError):
+            return False
+        return keyword in parameters or any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters.values()
+        )
+
     async def search(
         self,
         query: str,
         num_results: Optional[int] = None,
         *,
         engine: Optional[str] = None,
+        need_content: Optional[bool] = None,
     ) -> SearchResponse:
         """使用指定引擎或主引擎执行搜索。"""
         if num_results is None:
@@ -126,17 +141,35 @@ class SearchManager:
 
         sem = self._global_semaphore
 
+        # 可选通道（如 deepseek）可能整体不可用：没配 Key / 已熔断 / 通道关闭。
+        # 这种情况**不发请求、不算失败**，由上层记成 unavailable 级并继续下一级。
+        available = getattr(eng, "available", None)
+        if callable(available) and not available():
+            reason_of = getattr(eng, "unavailable_reason", None)
+            reason = reason_of() if callable(reason_of) else "通道不可用"
+            return SearchResponse(
+                query=query,
+                results=[],
+                engine=engine_name,
+                error=reason,
+                degraded=True,
+                signals={"available": False},
+            )
+
         last_error: Optional[str] = None
         attempts = 0
         degraded = False
         for attempt in range(self._max_retries + 1):
             try:
                 await self._rate_limit(engine_name)
+                engine_kwargs: dict[str, Any] = {}
+                if need_content is not None and self._supports(eng, "need_content"):
+                    engine_kwargs["need_content"] = need_content
                 if sem:
                     async with sem:
-                        resp = await eng.search(query, num_results)
+                        resp = await eng.search(query, num_results, **engine_kwargs)
                 else:
-                    resp = await eng.search(query, num_results)
+                    resp = await eng.search(query, num_results, **engine_kwargs)
                 attempts += max(1, int(getattr(resp, "attempts", 1) or 1))
                 if resp.success:
                     resp.attempts = attempts
@@ -151,6 +184,10 @@ class SearchManager:
                 # 不能因为 results 非空就当成功（fix(9) 回退条件修正）。
                 last_error = resp.error or "引擎返回空结果"
                 degraded = degraded or resp.degraded
+                # 永久失败（400/401/402/403/404/413）与预算耗尽：重试没有意义，
+                # 还会放大账单，直接交回上层换通道。
+                if (resp.signals or {}).get("permanent") or (resp.signals or {}).get("budget_exceeded"):
+                    break
             except Exception as e:
                 attempts += 1
                 last_error = f"{type(e).__name__}: {e}"
@@ -172,6 +209,8 @@ class SearchManager:
         self,
         query: str,
         num_results: Optional[int] = None,
+        *,
+        need_content: Optional[bool] = None,
     ) -> SearchResponse:
         """依次搜索各引擎，失败时自动回退。"""
         if num_results is None:
@@ -197,6 +236,13 @@ class SearchManager:
                 attempts += 1
                 stages.append({"stage": name, "kind": "network", "reason": f"超过预算 {budget:g}s"})
                 errors.append(f"{name}: 超过预算 {budget:g}s")
+                return None
+            if (resp.signals or {}).get("available") is False:
+                # 可选通道未配置/已熔断：不发请求、不算尝试，只留一条 unavailable 痕迹。
+                stages.append(
+                    {"stage": name, "kind": "unavailable", "reason": str(resp.error or "")[:160]}
+                )
+                # 未配置/熔断不算降级：出厂没配 Key 的部署不应让每次搜索都标 degraded。
                 return None
             attempts += max(1, int(getattr(resp, "attempts", 1) or 1))
             kind = (resp.signals or {}).get("failure")
@@ -232,7 +278,12 @@ class SearchManager:
             return None
 
         for name in self._engine_names:
-            done = await _try(name, lambda n=name: self.search(query, num_results, engine=n))
+            done = await _try(
+                name,
+                lambda n=name: self.search(
+                    query, num_results, engine=n, need_content=need_content
+                ),
+            )
             if done is not None:
                 return done
 
@@ -256,7 +307,12 @@ class SearchManager:
 
         # ③ DuckDuckGo：最后兜底，带固定预算（部署实测很慢）。
         for name in self._degraded_engines:
-            done = await _try(name, lambda n=name: self.search(query, num_results, engine=n))
+            done = await _try(
+                name,
+                lambda n=name: self.search(
+                    query, num_results, engine=n, need_content=need_content
+                ),
+            )
             if done is not None:
                 return done
 

@@ -6,7 +6,7 @@ import logging
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Awaitable, Callable, Optional
 from urllib.parse import urlparse
 
 import httpx
@@ -93,6 +93,29 @@ class SearchSession:
         "raw": [],
     }
 
+    #: operators 策略：一个 mode 一条查询（靠 site:/lang:/after: 表达原本要 3-4 条变体
+    #: 才能覆盖的意图）。DeepSeek 按「请求」计费，4 次变体 = 4 倍成本，而运算符是免费的。
+    #: 注意：官方只承诺 site: 子句之间用空格 + OR 连接，**不要发明括号嵌套**。
+    #: 每项声明「这个角度默认靠哪些运算符表达」，由 _operator_queries 统一拼装：
+    #: sites 是默认站点集（调用方显式传 sites 时**整体替换**，避免两串 OR 互相干扰）；
+    #: extra 是自然语言补充（如「官网」）；after_days/lang 是时效与语种默认值
+    #: （调用方显式传值优先）。
+    RESEARCH_OPERATORS: dict[str, dict[str, Any]] = {
+        "encyclopedia": {
+            "sites": ["baike.baidu.com", "zh.wikipedia.org", "baike.sogou.com"]
+        },
+        "community": {
+            "sites": ["zhihu.com", "tieba.baidu.com", "nga.cn", "v2ex.com"]
+        },
+        "news": {"after_days": 30, "lang": "zh"},
+        "official": {"extra": "官网"},
+        "video": {"sites": ["bilibili.com", "youtube.com"]},
+        "academic": {"sites": ["arxiv.org", "scholar.google.com", "cnki.net"]},
+    }
+
+    #: news 模式默认时间窗（天）；调用方显式传 after 时以调用方为准。
+    NEWS_WINDOW_DAYS = 30
+
     _DEFAULT_MODES = ("encyclopedia", "community")
 
     @staticmethod
@@ -111,6 +134,9 @@ class SearchSession:
         browser_fallback: bool = True,
         browser_timeout_seconds: float = 8.0,
         engine_budgets: Optional[dict[str, float]] = None,
+        fetch_mode: str = "api_first",
+        api_fetch: Optional[Callable[[str], Awaitable[Any]]] = None,
+        research_strategy: str = "operators",
     ) -> None:
         budgets = dict(engine_budgets or {})
         budgets.setdefault("duckduckgo", 15.0)
@@ -124,6 +150,11 @@ class SearchSession:
         )
         self._max_rounds = max_rounds
         self._read_timeout = read_timeout
+        #: 读页路径：api_first（先 Fetch API，失败回落本地）/ http_first / off
+        self._fetch_mode = str(fetch_mode or "api_first").strip().lower()
+        self._api_fetch = api_fetch
+        #: 研究模式策略：operators（1 条查询）/ variants（旧的多查询，成本 ×N）
+        self._research_strategy = str(research_strategy or "operators").strip().lower()
         self._rounds: list[SearchRound] = []
         self._results_index: dict[int, SearchResult] = {}
         self._read_urls: set[str] = set()
@@ -145,9 +176,98 @@ class SearchSession:
         """所有轮次的全部搜索结果，全局统一编号。"""
         return sorted(self._results_index.values(), key=lambda r: r.index)
 
-    async def search(self, query: str, num_results: int = 10) -> SearchResponse:
-        """执行新一轮搜索。"""
-        resp = await self._execute_search(query, num_results)
+    # ── 查询组装（运算符）─────────────────────────────────────────
+
+    @staticmethod
+    def compose_query(
+        query: str,
+        *,
+        sites: Optional[list[str]] = None,
+        lang: Optional[str] = None,
+        after: Optional[str] = None,
+        before: Optional[str] = None,
+        max_codepoints: int = 128,
+    ) -> str:
+        """把结构化参数拼成 DeepSeek 能识别的运算符查询。
+
+        截断顺序很重要：**先保证运算符完整，再截主题**——运算符被砍掉等于参数静默失效，
+        而主题被砍短只是模糊一点。
+        """
+        clauses: list[str] = []
+        site_values = [str(s).strip() for s in (sites or ()) if str(s).strip()]
+        if site_values:
+            clauses.append(" OR ".join(f"site:{value}" for value in site_values))
+        if lang:
+            clauses.append(f"lang:{str(lang).strip()}")
+        if after:
+            clauses.append(f"after:{str(after).strip()}")
+        if before:
+            clauses.append(f"before:{str(before).strip()}")
+        base = str(query or "").strip()
+        if not clauses:
+            return base[:max_codepoints]
+        suffix = " " + " ".join(clauses)
+        room = max(1, max_codepoints - len(suffix))
+        return (base[:room] + suffix)[:max_codepoints]
+
+    @staticmethod
+    def _operator_queries(
+        topic: str,
+        modes: list[str],
+        *,
+        sites: Optional[list[str]] = None,
+        lang: Optional[str] = None,
+        after: Optional[str] = None,
+        before: Optional[str] = None,
+    ) -> list[str]:
+        """把 mode 展开成一条（或少数几条）运算符查询，而不是 3-4 条自然语言变体。"""
+        from datetime import date, timedelta
+
+        queries: list[str] = []
+        for mode in modes:
+            spec = SearchSession.RESEARCH_OPERATORS.get(str(mode).strip())
+            if not spec:
+                continue
+            parts = [topic]
+            if spec.get("extra"):
+                parts.append(str(spec["extra"]))
+            effective_sites = list(sites) if sites else list(spec.get("sites") or ())
+            effective_after = after
+            if not effective_after and spec.get("after_days"):
+                days = int(spec["after_days"])
+                effective_after = (date.today() - timedelta(days=days)).isoformat()
+            effective_lang = lang or spec.get("lang")
+            queries.append(
+                SearchSession.compose_query(
+                    " ".join(part for part in parts if part),
+                    sites=effective_sites,
+                    lang=effective_lang,
+                    after=effective_after,
+                    before=before,
+                )
+            )
+        if not queries:
+            queries.append(
+                SearchSession.compose_query(topic, sites=sites, lang=lang, after=after, before=before)
+            )
+        return queries
+
+    async def search(
+        self,
+        query: str,
+        num_results: int = 10,
+        *,
+        sites: Optional[list[str]] = None,
+        lang: Optional[str] = None,
+        after: Optional[str] = None,
+        before: Optional[str] = None,
+        need_content: Optional[bool] = None,
+    ) -> SearchResponse:
+        """执行新一轮搜索（可带 site:/lang:/after:/before: 运算符）。"""
+        composed = self.compose_query(
+            query, sites=sites, lang=lang, after=after, before=before
+        )
+        resp = await self._execute_search(composed, num_results, need_content=need_content)
         if resp.success:
             self._rounds.append(
                 SearchRound(round_num=self.current_round + 1, query=query, response=resp)
@@ -167,14 +287,24 @@ class SearchSession:
         if not results_to_fetch:
             return [self._results_index[idx] for idx in indices if idx in self._results_index]
 
-        async with httpx.AsyncClient(
-            timeout=self._read_timeout,
-            follow_redirects=True,
-            headers=dict(self.READ_HEADERS),
-        ) as client:
-            await self._fetch_all(client, results_to_fetch)
+        # ⓪ Fetch API 优先：能拿到 Markdown 的页面就不再走本地 httpx（省一次反爬对抗）。
+        # 失败/被拒/格式不对的条目留在 remaining 里，继续走原有本地抓取，行为不变。
+        # 注意：requested 必须保留全量——_read_urls 要按「服务成功」登记，
+        # 否则 API 已读的页面不会进已读集合，下一轮搜索又会把它们当新结果。
+        requested = list(results_to_fetch)
+        remaining = requested
+        if self._fetch_mode == "api_first":
+            remaining = await self._fetch_via_api(requested)
 
-        for r in results_to_fetch:
+        if remaining:
+            async with httpx.AsyncClient(
+                timeout=self._read_timeout,
+                follow_redirects=True,
+                headers=dict(self.READ_HEADERS),
+            ) as client:
+                await self._fetch_all(client, remaining)
+
+        for r in requested:
             if r.content_fetched:
                 self._read_urls.add(r.url)
 
@@ -182,6 +312,45 @@ class SearchSession:
             self._rounds[-1].read_indices.extend(indices)
 
         return [self._results_index[idx] for idx in indices if idx in self._results_index]
+
+    async def _fetch_via_api(self, results: list[SearchResult]) -> list[SearchResult]:
+        """尝试用 Fetch API 读页；返回仍需本地抓取的条目。
+
+        与本地路径共用同一道 SSRF 闸门：**先把 URL 归一化并校验公网可达**，
+        再决定要不要把它交给第三方。私网地址一律不发（含内网面板、文件服务器）。
+        """
+        handler = self._api_fetch
+        if handler is None:
+            from neobot_app.web_search import deepseek_api
+
+            handler = deepseek_api.fetch_page
+
+        remaining: list[SearchResult] = []
+        for r in results:
+            target = self._normalize_fetch_url(r.url)
+            if target != r.url and not r.raw_url:
+                r.raw_url = r.url
+            if not await validate_public_url_async(target):
+                r.content = "[已阻止] 该地址不是公网地址，未抓取"
+                r.content_fetched = False
+                continue
+            try:
+                outcome = await handler(target)
+            except Exception:
+                logger.debug("Fetch API 读页失败，回落本地抓取: %s", target, exc_info=True)
+                remaining.append(r)
+                continue
+            content = getattr(outcome, "content", "") or ""
+            if not getattr(outcome, "ok", False) or not content:
+                remaining.append(r)
+                continue
+            r.content = content[: self.MAX_PAGE_SIZE]
+            r.content_fetched = True
+            r.content_format = "markdown"
+            title = getattr(outcome, "title", "") or ""
+            if title and not r.title:
+                r.title = title
+        return remaining
 
     async def read_single(self, index: int) -> Optional[SearchResult]:
         """按索引读取单条结果。"""
@@ -217,6 +386,11 @@ class SearchSession:
         num_results: int = 10,
         variant_result_limit: int = 6,
         total_result_limit: int = 30,
+        sites: Optional[list[str]] = None,
+        lang: Optional[str] = None,
+        after: Optional[str] = None,
+        before: Optional[str] = None,
+        need_content: Optional[bool] = None,
     ) -> SearchResponse:
         """智能研究模式：从多个角度自动生成查询变体，合并去重，仅计 1 轮。
 
@@ -230,34 +404,54 @@ class SearchSession:
         """
         import asyncio
 
-        if variants is None:
-            mode_list: list[str] = []
-            if modes is None:
-                mode_list = list(self._DEFAULT_MODES)
-            elif isinstance(modes, str):
-                mode_list = [modes]
-            else:
-                mode_list = modes
+        if isinstance(modes, str):
+            mode_list = [modes]
+        elif modes is None:
+            mode_list = list(self._DEFAULT_MODES)
+        else:
+            mode_list = list(modes)
 
-            resolved: list[str] = []
-            for m in mode_list:
-                tmpls = self.RESEARCH_MODES.get(m)
-                if tmpls is None:
-                    continue
-                for t in tmpls:
-                    resolved.append(t.format(topic=topic))
-            variants = resolved
+        use_operators = (
+            variants is None
+            and self._research_strategy != "variants"
+            and "raw" not in mode_list
+        )
+        if use_operators:
+            # 运算符策略：每个 mode 一条查询，合并去重后当一轮。DeepSeek 按请求计费，
+            # 这等于把原来 4-8 次请求压到 1-2 次，语义靠 site:/lang:/after: 表达。
+            query_list = self._operator_queries(
+                topic, mode_list,
+                sites=sites, lang=lang, after=after, before=before,
+            )
+            variants = []
+        else:
+            if variants is None:
+                resolved: list[str] = []
+                for m in mode_list:
+                    tmpls = self.RESEARCH_MODES.get(m)
+                    if tmpls is None:
+                        continue
+                    for t in tmpls:
+                        resolved.append(t.format(topic=topic))
+                variants = resolved
+            query_list = [topic] + [
+                self.compose_query(v, sites=sites, lang=lang, after=after, before=before)
+                for v in variants
+            ]
 
         async def _query(q: str, n: int) -> SearchResponse:
-            return await self._execute_search(q, n)
+            return await self._execute_search(q, n, need_content=need_content)
 
-        # 每个变体使用统一的 variant_result_limit
         variant_n = max(1, min(variant_result_limit, num_results))
-        primary_future = _query(topic, num_results)
-        variant_futures = [_query(v, variant_n) for v in variants]
-
-        primary = await primary_future
-        variant_responses = await asyncio.gather(*variant_futures)
+        if use_operators:
+            primary = await _query(query_list[0], num_results)
+            variant_responses = [await _query(q, variant_n) for q in query_list[1:]]
+        else:
+            # 旧行为：主查询与变体并发（运营商通道下会放大 QPS，故默认不启用）
+            primary = await _query(query_list[0], num_results)
+            variant_responses = list(
+                await asyncio.gather(*(_query(q, variant_n) for q in query_list[1:]))
+            )
 
         if not primary.success:
             return primary
@@ -283,18 +477,21 @@ class SearchSession:
         primary.total_estimated = len(primary.results)
         primary.query = topic
 
-        mode_labels = mode_list if variants is None else ["custom"]
+        mode_labels = mode_list if variants is not None else ["custom"]
+        strategy_label = (
+            f"operators×{len(query_list)}" if use_operators else f"+{len(variants)} variants"
+        )
         self._rounds.append(
             SearchRound(
                 round_num=self.current_round + 1,
-                query=f"{topic} [modes: {','.join(mode_labels)}, +{len(variants)} variants]",
+                query=f"{topic} [modes: {','.join(mode_labels)}, {strategy_label}]",
                 response=primary,
             )
         )
         return primary
 
     async def _execute_search(
-        self, query: str, num_results: int
+        self, query: str, num_results: int, *, need_content: Optional[bool] = None
     ) -> SearchResponse:
         """核心搜索流水线：抓取 → 去重 → 多样性排序 → 编号。"""
         if self.current_round >= self._max_rounds:
@@ -307,7 +504,7 @@ class SearchSession:
             )
 
         fetch_count = min(num_results * 2, 30)
-        resp = await self._manager.search_with_fallback(query, fetch_count)
+        resp = await self._manager.search_with_fallback(query, fetch_count, need_content=need_content)
 
         if not resp.success:
             return resp

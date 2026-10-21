@@ -59,6 +59,19 @@ DEFAULT_EAGER_TOOL_SKILLS = frozenset(
 )
 
 
+def _web_search_section(config: Any) -> Any:
+    """给 agent 工具返回一个「活配置」提供者，而不是构造期快照。
+
+    工具面（WebTools）在启动时只构造一次；若传快照，改 engines / fetch_mode
+    必须重启。这里返回 callable：每次调用现取活配置，拿不到时回退到本进程的
+    配置段（测试里没走 bootstrap 也能用）。
+    """
+    from neobot_app.web_search.config_section import current_config, section_to_config_dict
+
+    fallback = section_to_config_dict(getattr(config, "web_search", None))
+    return lambda: current_config() or fallback
+
+
 def build_all_skills(
     *,
     disabled_skills: list[str] | None = None,
@@ -416,6 +429,9 @@ def build_all_skills(
             credential_manager=credential_manager, provider=agent_provider,
             vision_provider=vision_provider, skill_manager=mgr, notification_hub=notification_hub,
             config=tools_config,
+            # [web_search] 段（含 engines 顺序）注入主 Agent 的工具面；
+            # 转换逻辑与 bootstrap 共用 web_search.config_section，避免两套默认值。
+            web_search_config=_web_search_section(config),
         )
         owner = AgentToolsSkill(runtime)
         mgr.register(owner)

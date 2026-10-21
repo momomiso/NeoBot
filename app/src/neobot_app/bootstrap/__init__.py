@@ -168,31 +168,32 @@ def plan_maintenance_run(
 _MAINTENANCE_RETRY_STATUSES = frozenset({"failed", "running"})
 
 
-def _web_search_config_dict(config: Any) -> dict[str, Any]:
-    """把 `[web_search]` 段转成 WebSearchExecutor 需要的 dict。
+def apply_web_search_config(config: Any) -> None:
+    """把 [web_search.api] 段应用为进程级 API 配置（启动与配置重载都要走）。
 
-    此前两处调用点都硬编码 `{}`，导致 `[web_search]` 段是**死配置**（fix(9) F5）：
-    引擎顺序、浏览器兜底、预算都改不动。这里按实测默认值补全：
-    duckduckgo 作为最后兜底给 15s（部署实测它慢），浏览器通道给 8s（实测单次约 1s）。
+    放在这里而不是装配期零散调用：搜索通道的凭证/限流/预算都是进程级的，
+    漏调一次就等于「配了 Key 却不生效」，而且这种漏很难从日志上看出来。
     """
-    section = getattr(config, "web_search", None)
-    if section is None:
-        return {}
-    engines = getattr(section, "engines", None)
-    result: dict[str, Any] = {
-        "engines": list(engines) if engines else ["bing", "duckduckgo"],
-        "max_rounds": int(getattr(section, "max_search_rounds", None) or 5),
-        "preview_pages_limit": int(getattr(section, "preview_pages_limit", None) or 30),
-        "variant_result_limit": int(getattr(section, "variant_result_limit", None) or 6),
-        "browser_fallback": bool(getattr(section, "browser_fallback", True)),
-        "browser_timeout_seconds": float(
-            getattr(section, "browser_timeout_seconds", None) or 8.0
-        ),
-    }
-    budgets = getattr(section, "engine_timeout_seconds", None)
-    if isinstance(budgets, dict) and budgets:
-        result["engine_budgets"] = {str(k): float(v) for k, v in budgets.items()}
-    return result
+    from neobot_app.web_search import deepseek_api
+    from neobot_app.web_search.config_section import section_to_config_dict, set_live_config
+
+    web_search = getattr(config, "web_search", None)
+    deepseek_api.configure(getattr(web_search, "api", None))
+    # 工具面（engines / fetch_mode / research_strategy）走活配置，重载后无需重启。
+    set_live_config(section_to_config_dict(web_search))
+
+
+def _web_search_config_dict(config: Any) -> dict[str, Any]:
+    """把 [web_search] 段转成 WebSearchExecutor 需要的 dict。
+
+    此前两处调用点都硬编码空 dict，导致 [web_search] 段是死配置（fix(9) F5）。
+    转换逻辑现在收敛在 web_search.config_section（bootstrap 与 skills 共用），
+    本函数只负责「顺便把 API 配置应用到进程级」——重载路径也会经过这里。
+    """
+    from neobot_app.web_search.config_section import section_to_config_dict
+
+    apply_web_search_config(config)
+    return section_to_config_dict(getattr(config, "web_search", None))
 
 
 def _register_billing_hot_reload_rule() -> None:
@@ -660,6 +661,7 @@ def create_application(*, owns_plugins: bool = True) -> NeoBotApplication:
     _run_once("loguru", lambda: configure_loguru(DATA_DIR / "logs", runtime_events=True))
     logger_factory = _reuse_or("logger_factory", LoguruLoggerFactory)
     config = _load_config_for_reuse()
+    apply_web_search_config(config)
 
     sync_data_files(SRC_DATA_DIR, DATA_DIR)
     sync_default_prompts(DATA_DIR, logger=logger_factory.get_logger("app.prompt"))
@@ -803,17 +805,28 @@ def create_application(*, owns_plugins: bool = True) -> NeoBotApplication:
 
     # ── 配置热重载编排：组件自己声明关心哪些配置项并负责生效 ──
     # 装配顺序即生效顺序：适配器先恢复连接，其余组件再按新配置重建。
-    hot_reload_registry = _reuse_or(
-        "hot_reload_registry",
-        lambda: HotReloadRegistry(
+    # 注册必须放在工厂函数里：_reuse_or 复用已有注册表时不会重复注册，
+    # 否则每次软重启都会打一条「已注册，跳过重复注册」的假告警。
+    def _build_hot_reload_registry() -> HotReloadRegistry:
+        from neobot_app.runtime.web_search_reload import WebSearchReloadConsumer
+
+        registry = HotReloadRegistry(
             [
                 AdapterSupervisor(
                     adapter, logger=logger_factory.get_logger("app.adapter_reload")
                 )
             ],
             logger=logger_factory.get_logger("app.hot_reload"),
-        ),
-    )
+        )
+        # 联网搜索：Key / QPS / 预算 / fetch_mode / engines 的改动在这里生效。
+        registry.register(
+            WebSearchReloadConsumer(
+                logger=logger_factory.get_logger("app.web_search_reload")
+            )
+        )
+        return registry
+
+    hot_reload_registry = _reuse_or("hot_reload_registry", _build_hot_reload_registry)
 
     # ── 插件主机基础设施 ──
     plugin = _reuse_or("plugin", lambda: build_plugin_host(logger_factory=logger_factory))
@@ -856,6 +869,42 @@ def create_application(*, owns_plugins: bool = True) -> NeoBotApplication:
 
     # ── 运行时组件 ──
     notification_hub = build_notification_hub(logger_factory=logger_factory)
+
+    # 联网搜索的熔断告警（402 余额不足 / 连续 429）走管理员私聊。
+    # 用回调注入而不是让 web_search 依赖通知中心：搜索是基础能力，
+    # 通知是上层编排，反向依赖会成环。
+    _admin_accounts = [
+        str(uid) for uid in (getattr(getattr(config, "chat", None), "admin_accounts", None) or ())
+    ]
+
+    def _notify_search_admin(message: str) -> None:
+        if not _admin_accounts:
+            return
+
+        async def _send() -> None:
+            try:
+                await notification_hub.publish(
+                    source="web_search",
+                    kind="private",
+                    conversation_id=_admin_accounts[0],
+                    content=message,
+                    manager_name="联网搜索",
+                    reasons=[message],
+                )
+            except Exception:  # 告警失败不得影响搜索链路
+                logger_factory.get_logger("app.web_search_reload").warning(
+                    "联网搜索告警发送失败"
+                )
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.create_task(_send())
+
+    from neobot_app.web_search import deepseek_api as _deepseek_api
+
+    _deepseek_api.set_notifier(_notify_search_admin)
     drawing_manager = build_drawing_manager(
         config=config,
         logger_factory=logger_factory,
@@ -1299,6 +1348,9 @@ def create_application(*, owns_plugins: bool = True) -> NeoBotApplication:
             logger_factory=logger_factory,
             vision_provider=_current_vision_provider(new_config),
             prompt_store=prompt_store,
+            # 解题 Agent 的执行器同样持有搜索配置：重载时不传就等于把 engines /
+            # fetch_mode / research_strategy 打回默认值（此前就是这个缺口）。
+            web_search_config=_web_search_config_dict(new_config),
         )
         # 装配函数在 provider 不可用时直接 return、不动 manager：那样旧 Agent 会继续
         # 用旧凭据跑，比「功能停用」更危险。这里显式摘掉。

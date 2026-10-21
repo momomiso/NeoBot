@@ -1627,6 +1627,146 @@ class AvatarsConfig:
 
 
 @dataclass
+class WebSearchApiConfig:
+    """DeepSeek 搜索 / 抓取 API 通道（/v1/tools/search、/v1/tools/fetch）。
+
+    官方口径（2026-10）：账户级 Search/Fetch 各 5 QPS；计费 $0.75 / 1000 成功请求
+    （≈ ¥5 / 1000），失败、空结果、超时不计费；query 上限 128 个 Unicode 码点。
+    因此这里的默认值都按「留余量 + 默认不花钱」取：qps=4、content_on_search=false、
+    日上限 1000 次（≈ ¥5/天）。
+    """
+
+    enabled: bool = field(
+        default=True,
+        metadata={
+            "description": (
+                "启用 DeepSeek 搜索/抓取 API 通道。**没有 Key 时自动跳过**，"
+                "所以默认开启也不会让出厂部署产生任何请求或费用"
+            )
+        },
+    )
+    base_url: str = field(
+        default="https://api.deepseek.com",
+        metadata={"description": "API 基址；端点固定为 /v1/tools/search 与 /v1/tools/fetch"},
+    )
+    api_key_env: str = field(
+        default="DeepSeekSearch_APIKey",
+        metadata={
+            "description": (
+                "优先读取的环境变量名；该变量为空时回退 DeepSeek_APIKey（与聊天共用）。"
+                "建议单独申请一个 Key：共用一个 Key 时，402 会同时打断聊天"
+            )
+        },
+    )
+    timeout_seconds: float = field(
+        default=8.0,
+        metadata={"description": "单次请求超时（秒）"},
+    )
+    qps_limit: float = field(
+        default=4.0,
+        metadata={
+            "description": (
+                "进程级 QPS 上限（官方账户级 5，留 1 余量）。"
+                "多进程/多实例共用一个账户时按「每进程值 × 进程数 ≤ 5」复核"
+            )
+        },
+    )
+    default_count: int = field(
+        default=10,
+        metadata={"description": "未指定 num_results 时的返回条数（官方 1–50）"},
+    )
+    max_count: int = field(
+        default=50,
+        metadata={"description": "单次返回条数上限（官方 1–50）；条数不影响计价"},
+    )
+    min_rerank_score: float = field(
+        default=1.5,
+        metadata={
+            "description": (
+                "高质量重排分阈值（官方：≥1.5 为高质量）。低于该分只标 degraded，"
+                "**不丢弃结果**——API 已做语义重排，误杀比降级更伤"
+            )
+        },
+    )
+    content_on_search: bool = field(
+        default=False,
+        metadata={
+            "description": (
+                "搜索时是否默认带回正文（need_content）。开启后一次请求即可拿到正文，"
+                "省一次 Fetch，但响应体明显变大；默认关闭，先看摘要再按需读"
+            )
+        },
+    )
+    fetch_mode: str = field(
+        default="api_first",
+        metadata={
+            "description": (
+                "读页路径：api_first（先 Fetch API，失败回落本地抓取）/ "
+                "http_first（只用本地抓取）/ off（禁用 Fetch API）"
+            )
+        },
+    )
+    price_per_1000_cny: float = field(
+        default=5.0,
+        metadata={
+            "description": (
+                "计价用单价（元 / 1000 成功请求），仅用于本地成本统计，不参与请求。"
+                "官方 $0.75/1000，按人民币口径取 5.0"
+            )
+        },
+    )
+    daily_request_limit: int = field(
+        default=1000,
+        metadata={
+            "description": (
+                "进程级每日成功请求上限；超限后**降级到免费通道**（Bing → 浏览器 → DDG），"
+                "不抛错。0 表示不限"
+            )
+        },
+    )
+    conversation_request_limit: int = field(
+        default=50,
+        metadata={
+            "description": "单次会话内的 API 请求上限；0 表示不限（会话边界由调用方用 search_scope 标记）",
+        },
+    )
+    cooldown_on_402_seconds: int = field(
+        default=3600,
+        metadata={"description": "余额不足（402）后的熔断时长（秒）"},
+    )
+    cooldown_on_429_seconds: int = field(
+        default=60,
+        metadata={"description": "连续 3 次限流（429）后的熔断时长（秒）"},
+    )
+    max_retries: int = field(
+        default=2,
+        metadata={"description": "可重试错误（408/429/5xx/网络异常）的最大重试次数"},
+    )
+    research_strategy: str = field(
+        default="operators",
+        metadata={
+            "description": (
+                "研究模式策略：operators（把 4 条变体压成 1 条带 site:/lang:/after: 的查询，"
+                "省 4 倍成本）/ variants（沿用旧的多样本查询）"
+            )
+        },
+    )
+    allow_external_query: bool = field(
+        default=True,
+        metadata={
+            "description": (
+                "是否允许把查询词与 URL 发给第三方（DeepSeek）。关闭后该通道整体不发起请求，"
+                "仅用本地通道"
+            )
+        },
+    )
+    use_system_proxy: bool = field(
+        default=False,
+        metadata={"description": "是否跟随系统/环境变量代理；默认直连"},
+    )
+
+
+@dataclass
 class WebSearchConfig:
     """联网搜索工具包配置。"""
 
@@ -1647,12 +1787,12 @@ class WebSearchConfig:
         metadata={"description": "研究模式中每个变体查询返回的最大结果数，默认 6"},
     )
     engines: Optional[List[str]] = field(
-        default_factory=lambda: ["bing", "duckduckgo"],
+        default_factory=lambda: ["deepseek", "bing", "duckduckgo"],
         metadata={
             "description": (
-                "搜索引擎与回退顺序（fix(9)）。默认 [\"bing\", \"duckduckgo\"]；"
-                "duckduckgo 始终作为最后兜底执行，排在浏览器通道之后。"
-                "这两个引擎都无需申请 Key，所以出厂即可用"
+                "搜索引擎与回退顺序。默认 [\"deepseek\", \"bing\", \"duckduckgo\"]；"
+                "deepseek 没配 Key 时自动跳过（零请求、零费用），duckduckgo 始终作为"
+                "最后兜底执行、排在浏览器通道之后。删掉 deepseek 即退回纯免费链路"
             )
         },
     )
@@ -1678,6 +1818,7 @@ class WebSearchConfig:
             )
         },
     )
+    api: WebSearchApiConfig = field(default_factory=WebSearchApiConfig)
 
 
 @dataclass

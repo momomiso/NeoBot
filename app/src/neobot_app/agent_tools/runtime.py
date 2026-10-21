@@ -49,7 +49,8 @@ def result_json(value: Any) -> Any:
 class AgentToolRuntime:
     def __init__(self, sandbox: Any, *, state_dir: Path, credential_manager: Any = None,
                  provider: Any = None, vision_provider: Any = None, skill_manager: Any = None,
-                 notification_hub: Any = None, config: AgentToolsConfig | None = None) -> None:
+                 notification_hub: Any = None, config: AgentToolsConfig | None = None,
+                 web_search_config: dict[str, Any] | None = None) -> None:
         from neobot_app.agent_tools.delegation import ChildAgentTools
         from neobot_app.agent_tools.goal_driver import GoalDriver
         from neobot_app.agent_tools.lsp import LspTools
@@ -72,7 +73,9 @@ class AgentToolRuntime:
         self.state = StateTools(state_dir / "state", approve=self._approve_plan, max_goal_rounds=self.config.max_goal_rounds)
         self.files = AgentFileTools(sandbox)
         self.processes = ProcessTools(self.workspace, completion_callback=self._notify)
-        self.web = WebTools()
+        # [web_search] 段（engines / 预算 / 浏览器兜底）必须在这里接住：
+        # 之前 WebTools() 不带参数，配置对主 Agent 是死的（见 config_section 模块说明）。
+        self.web = WebTools(web_search_config=web_search_config)
         self.ptc = PtcRunner()
         from neobot_app.agent_tools.lsp_defaults import default_python_lsp_servers
         servers = default_python_lsp_servers() if self.config.lsp_enabled else {}

@@ -434,9 +434,21 @@ ENGINE_REGISTRY: dict[str, type[BaseSearchEngine]] = {
 }
 
 
+def _load_optional_engines() -> None:
+    """惰性加载可选引擎。
+
+    deepseek_api 需要 import BaseSearchEngine，若在本模块顶部反向 import 就成环；
+    改为「需要时才 import，模块导入时自注册进 ENGINE_REGISTRY」。
+    """
+    from neobot_app.web_search import deepseek_api  # noqa: F401  (导入即注册)
+
+
 def get_engine(name: str, **kwargs) -> BaseSearchEngine:
     """按名称创建引擎实例。"""
     cls = ENGINE_REGISTRY.get(name)
+    if cls is None:
+        _load_optional_engines()
+        cls = ENGINE_REGISTRY.get(name)
     if cls is None:
         raise ValueError(f"未知搜索引擎: {name}，可用: {list(ENGINE_REGISTRY)}")
     return cls(**kwargs)

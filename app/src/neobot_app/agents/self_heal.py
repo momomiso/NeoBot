@@ -776,6 +776,8 @@ class SelfHealToolExecutor(ToolExecutor):
             max_rounds=ws.get("max_rounds", 5),
             preview_pages_limit=ws.get("preview_pages_limit", 30),
             variant_result_limit=ws.get("variant_result_limit", 6),
+            fetch_mode=ws.get("fetch_mode"),
+            research_strategy=ws.get("research_strategy"),
         )
 
     def reset_search(self) -> None:

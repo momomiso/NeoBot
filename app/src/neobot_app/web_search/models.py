@@ -28,6 +28,18 @@ class SearchResult:
     published_at: Optional[str] = None
     site_name: str = ""
 
+    # DeepSeek 搜索 API 的结构化信号（HTML 引擎不提供，全部有默认值）：
+    # summary 是给模型读的 600–800 字长摘要（snippet 只有 100–200 字，给人看）；
+    # authority 0–4（-1 未知，≥3 高权威）；rerank_score 0–3（≥1.5 为高质量）。
+    summary: str = ""
+    authority: int = -1
+    rerank_score: float = 0.0
+    site_icon: str = ""
+
+    #: 正文格式：html（本地抓取，需要 ContentExtractor）或 markdown（Fetch API 直接给）。
+    #: 读页侧据此决定「要不要再过一遍抽取器」——对 Markdown 再抽一次只会把结构弄坏。
+    content_format: str = "html"
+
     def __post_init__(self) -> None:
         if not self.raw_url:
             self.raw_url = self.url
