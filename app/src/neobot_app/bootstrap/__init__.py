@@ -175,9 +175,12 @@ def apply_web_search_config(config: Any) -> None:
     漏调一次就等于「配了 Key 却不生效」，而且这种漏很难从日志上看出来。
     """
     from neobot_app.web_search import deepseek_api
+    from neobot_app.web_search.config_section import section_to_config_dict, set_live_config
 
-    section = getattr(getattr(config, "web_search", None), "api", None)
-    deepseek_api.configure(section)
+    web_search = getattr(config, "web_search", None)
+    deepseek_api.configure(getattr(web_search, "api", None))
+    # 工具面（engines / fetch_mode / research_strategy）走活配置，重载后无需重启。
+    set_live_config(section_to_config_dict(web_search))
 
 
 def _web_search_config_dict(config: Any) -> dict[str, Any]:
@@ -802,17 +805,28 @@ def create_application(*, owns_plugins: bool = True) -> NeoBotApplication:
 
     # ── 配置热重载编排：组件自己声明关心哪些配置项并负责生效 ──
     # 装配顺序即生效顺序：适配器先恢复连接，其余组件再按新配置重建。
-    hot_reload_registry = _reuse_or(
-        "hot_reload_registry",
-        lambda: HotReloadRegistry(
+    # 注册必须放在工厂函数里：_reuse_or 复用已有注册表时不会重复注册，
+    # 否则每次软重启都会打一条「已注册，跳过重复注册」的假告警。
+    def _build_hot_reload_registry() -> HotReloadRegistry:
+        from neobot_app.runtime.web_search_reload import WebSearchReloadConsumer
+
+        registry = HotReloadRegistry(
             [
                 AdapterSupervisor(
                     adapter, logger=logger_factory.get_logger("app.adapter_reload")
                 )
             ],
             logger=logger_factory.get_logger("app.hot_reload"),
-        ),
-    )
+        )
+        # 联网搜索：Key / QPS / 预算 / fetch_mode / engines 的改动在这里生效。
+        registry.register(
+            WebSearchReloadConsumer(
+                logger=logger_factory.get_logger("app.web_search_reload")
+            )
+        )
+        return registry
+
+    hot_reload_registry = _reuse_or("hot_reload_registry", _build_hot_reload_registry)
 
     # ── 插件主机基础设施 ──
     plugin = _reuse_or("plugin", lambda: build_plugin_host(logger_factory=logger_factory))
@@ -855,6 +869,42 @@ def create_application(*, owns_plugins: bool = True) -> NeoBotApplication:
 
     # ── 运行时组件 ──
     notification_hub = build_notification_hub(logger_factory=logger_factory)
+
+    # 联网搜索的熔断告警（402 余额不足 / 连续 429）走管理员私聊。
+    # 用回调注入而不是让 web_search 依赖通知中心：搜索是基础能力，
+    # 通知是上层编排，反向依赖会成环。
+    _admin_accounts = [
+        str(uid) for uid in (getattr(getattr(config, "chat", None), "admin_accounts", None) or ())
+    ]
+
+    def _notify_search_admin(message: str) -> None:
+        if not _admin_accounts:
+            return
+
+        async def _send() -> None:
+            try:
+                await notification_hub.publish(
+                    source="web_search",
+                    kind="private",
+                    conversation_id=_admin_accounts[0],
+                    content=message,
+                    manager_name="联网搜索",
+                    reasons=[message],
+                )
+            except Exception:  # 告警失败不得影响搜索链路
+                logger_factory.get_logger("app.web_search_reload").warning(
+                    "联网搜索告警发送失败"
+                )
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.create_task(_send())
+
+    from neobot_app.web_search import deepseek_api as _deepseek_api
+
+    _deepseek_api.set_notifier(_notify_search_admin)
     drawing_manager = build_drawing_manager(
         config=config,
         logger_factory=logger_factory,
@@ -1298,6 +1348,9 @@ def create_application(*, owns_plugins: bool = True) -> NeoBotApplication:
             logger_factory=logger_factory,
             vision_provider=_current_vision_provider(new_config),
             prompt_store=prompt_store,
+            # 解题 Agent 的执行器同样持有搜索配置：重载时不传就等于把 engines /
+            # fetch_mode / research_strategy 打回默认值（此前就是这个缺口）。
+            web_search_config=_web_search_config_dict(new_config),
         )
         # 装配函数在 provider 不可用时直接 return、不动 manager：那样旧 Agent 会继续
         # 用旧凭据跑，比「功能停用」更危险。这里显式摘掉。

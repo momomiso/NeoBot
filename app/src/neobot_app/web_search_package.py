@@ -59,8 +59,31 @@ def _build_search_tool() -> ToolDefinition:
                             "community（社区类，查知乎/贴吧/论坛/NGA）、"
                             "news（新闻类）、official（官方类，查官网）、"
                             "video（视频类）、academic（学术类）。"
-                            "不填则仅做普通关键词搜索，易返回低相关度结果"
+                            "默认用运算符把一次研究压成一条查询（省成本），"
+                            "不填则仅做普通关键词搜索"
                         ),
+                    },
+                    "sites": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "maxItems": 4,
+                        "description": "限定站点，如 ['github.com','arxiv.org']（拼成 site:a OR site:b）",
+                    },
+                    "lang": {
+                        "type": "string",
+                        "description": "语言过滤，如 zh / en / zh,en",
+                    },
+                    "after": {
+                        "type": "string",
+                        "description": "发布时间下限，如 2026 或 2026-01-01",
+                    },
+                    "before": {
+                        "type": "string",
+                        "description": "发布时间上限，如 2026-06-01",
+                    },
+                    "need_content": {
+                        "type": "boolean",
+                        "description": "是否在同一次请求里带回正文（更贵，但省一次 read）",
                     },
                 },
                 "required": ["query"],
@@ -107,6 +130,21 @@ def _build_status_tool() -> ToolDefinition:
     }
 
 
+def _operator_args(args: dict[str, Any]) -> dict[str, Any]:
+    """从工具参数里取出 sites/lang/after/before/need_content（与 WebTools 同一套语义）。"""
+    filters: dict[str, Any] = {}
+    sites = args.get("sites")
+    if isinstance(sites, list) and sites:
+        filters["sites"] = [str(site).strip() for site in sites][:4]
+    for key in ("lang", "after", "before"):
+        value = args.get(key)
+        if isinstance(value, str) and value.strip():
+            filters[key] = value.strip()
+    if isinstance(args.get("need_content"), bool):
+        filters["need_content"] = args["need_content"]
+    return filters
+
+
 class WebSearchExecutor:
     """在 SearchSession 内执行网页搜索工具。"""
 
@@ -120,6 +158,8 @@ class WebSearchExecutor:
         browser_fallback: bool = True,
         browser_timeout_seconds: float = 8.0,
         engine_budgets: dict[str, float] | None = None,
+        fetch_mode: str | None = None,
+        research_strategy: str | None = None,
     ) -> None:
         self._engines = engines or ["bing", "duckduckgo"]
         self._max_rounds = max_rounds
@@ -128,6 +168,8 @@ class WebSearchExecutor:
         self._browser_fallback = browser_fallback
         self._browser_timeout_seconds = browser_timeout_seconds
         self._engine_budgets = engine_budgets
+        self._fetch_mode = fetch_mode
+        self._research_strategy = research_strategy
         self._session: SearchSession | None = None
 
     def _get_session(self) -> SearchSession:
@@ -138,6 +180,12 @@ class WebSearchExecutor:
                 browser_fallback=self._browser_fallback,
                 browser_timeout_seconds=self._browser_timeout_seconds,
                 engine_budgets=self._engine_budgets,
+                **({"fetch_mode": self._fetch_mode} if self._fetch_mode else {}),
+                **(
+                    {"research_strategy": self._research_strategy}
+                    if self._research_strategy
+                    else {}
+                ),
             )
         return self._session
 
@@ -164,6 +212,7 @@ class WebSearchExecutor:
         num_results = max(1, min(num_results, self._preview_pages_limit))
         mode = args.get("mode")
 
+        filters = _operator_args(args)
         if mode and mode != "raw":
             try:
                 resp = await session.research(
@@ -172,11 +221,12 @@ class WebSearchExecutor:
                     num_results=num_results,
                     variant_result_limit=self._variant_result_limit,
                     total_result_limit=self._preview_pages_limit,
+                    **filters,
                 )
             except Exception as e:
                 return f"[错误] 研究搜索失败: {e}"
         else:
-            resp = await session.search(query, num_results=num_results)
+            resp = await session.search(query, num_results=num_results, **filters)
 
         if not resp.success:
             return f"[搜索失败] {resp.error}"
@@ -205,6 +255,20 @@ class WebSearchExecutor:
         parsed_pages = []
         for r in results:
             if r.content_fetched and r.content:
+                if getattr(r, "content_format", "html") == "markdown":
+                    # Fetch API 直接给 Markdown：再喂 ContentExtractor（按 HTML 解析）
+                    # 只会把结构弄坏，这里直接透传。
+                    from neobot_app.web_parser.models import PageMetadata, ParsedPage
+
+                    parsed_pages.append(
+                        ParsedPage(
+                            url=r.url,
+                            metadata=PageMetadata(title=r.title or ""),
+                            content_text=r.content,
+                            content_markdown=r.content,
+                        )
+                    )
+                    continue
                 parsed = extractor.extract(r.content, r.url)
                 parsed_pages.append(parsed)
             else:

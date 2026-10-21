@@ -36,6 +36,10 @@ class SearchResult:
     rerank_score: float = 0.0
     site_icon: str = ""
 
+    #: 正文格式：html（本地抓取，需要 ContentExtractor）或 markdown（Fetch API 直接给）。
+    #: 读页侧据此决定「要不要再过一遍抽取器」——对 Markdown 再抽一次只会把结构弄坏。
+    content_format: str = "html"
+
     def __post_init__(self) -> None:
         if not self.raw_url:
             self.raw_url = self.url

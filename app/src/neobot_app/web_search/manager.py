@@ -110,12 +110,27 @@ class SearchManager:
             except Exception:  # pragma: no cover - 关闭失败只记日志
                 logger.debug("关闭搜索引擎 %r 失败", engine, exc_info=True)
 
+    @staticmethod
+    def _supports(engine: Any, keyword: str) -> bool:
+        """引擎方法是否接受某个可选关键字（bing/DDG 不接受 need_content）。"""
+        import inspect
+
+        try:
+            parameters = inspect.signature(engine.search).parameters
+        except (TypeError, ValueError):
+            return False
+        return keyword in parameters or any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters.values()
+        )
+
     async def search(
         self,
         query: str,
         num_results: Optional[int] = None,
         *,
         engine: Optional[str] = None,
+        need_content: Optional[bool] = None,
     ) -> SearchResponse:
         """使用指定引擎或主引擎执行搜索。"""
         if num_results is None:
@@ -147,11 +162,14 @@ class SearchManager:
         for attempt in range(self._max_retries + 1):
             try:
                 await self._rate_limit(engine_name)
+                engine_kwargs: dict[str, Any] = {}
+                if need_content is not None and self._supports(eng, "need_content"):
+                    engine_kwargs["need_content"] = need_content
                 if sem:
                     async with sem:
-                        resp = await eng.search(query, num_results)
+                        resp = await eng.search(query, num_results, **engine_kwargs)
                 else:
-                    resp = await eng.search(query, num_results)
+                    resp = await eng.search(query, num_results, **engine_kwargs)
                 attempts += max(1, int(getattr(resp, "attempts", 1) or 1))
                 if resp.success:
                     resp.attempts = attempts
@@ -191,6 +209,8 @@ class SearchManager:
         self,
         query: str,
         num_results: Optional[int] = None,
+        *,
+        need_content: Optional[bool] = None,
     ) -> SearchResponse:
         """依次搜索各引擎，失败时自动回退。"""
         if num_results is None:
@@ -258,7 +278,12 @@ class SearchManager:
             return None
 
         for name in self._engine_names:
-            done = await _try(name, lambda n=name: self.search(query, num_results, engine=n))
+            done = await _try(
+                name,
+                lambda n=name: self.search(
+                    query, num_results, engine=n, need_content=need_content
+                ),
+            )
             if done is not None:
                 return done
 
@@ -282,7 +307,12 @@ class SearchManager:
 
         # ③ DuckDuckGo：最后兜底，带固定预算（部署实测很慢）。
         for name in self._degraded_engines:
-            done = await _try(name, lambda n=name: self.search(query, num_results, engine=n))
+            done = await _try(
+                name,
+                lambda n=name: self.search(
+                    query, num_results, engine=n, need_content=need_content
+                ),
+            )
             if done is not None:
                 return done
 

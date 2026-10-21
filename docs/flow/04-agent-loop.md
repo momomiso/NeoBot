@@ -6,7 +6,7 @@ covers:
   - app/src/neobot_app/agents/
   - app/src/neobot_app/agent_tools/invocation.py
 verified_against: 528fe18
-verified_hash: c906ef4d946c
+verified_hash: 2d6c79758228
 ---
 
 # 04 Agent 循环：工具迭代 / 轮次上限 / 失败语义 / 自修复
@@ -213,6 +213,10 @@ flowchart TD
 | 取消标记 | `cancel_handler(reason)` | 每个回复事件独立 | 非终态转 CANCELLED，工具尽快退出 |
 
 ## 易错点
+
+* 研究模式默认改为 `operators`：`WebSearchExecutor.search` 带 `mode` 时只发 1 条运算符查询（旧 `variants` 仍可配）；同时新增 `sites`/`lang`/`after`/`before`/`need_content` 参数，直通 `SearchSession`。
+
+* 自修复 / 解题 Agent 的 `WebSearchExecutor` 多接一个 `fetch_mode`：`read()` 先走 Fetch API 拿 Markdown，失败回落本地抓取（配置来自 `[web_search.api].fetch_mode`）。
 
 * **主循环不在 `agents/problem_solver.py`**：那是配置与委托；循环本体在
   `packages/chat/src/neobot_chat/runtime/agent.py`。改循环语义要同时看 `invoke` 与 `stream_invoke`。

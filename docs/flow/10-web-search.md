@@ -4,7 +4,7 @@ covers:
   - app/src/neobot_app/web_search/
   - app/src/neobot_app/web_search_package.py
 verified_against: 528fe18
-verified_hash: a8fdd1dc8440
+verified_hash: a8fe7d5e91bf
 ---
 
 # 10 联网搜索：DeepSeek API → HTTP(Bing) → 浏览器脚本化 → DuckDuckGo 四级回退
@@ -554,6 +554,13 @@ flowchart TD
   必须 `permanent=True` 提前返回，否则 4xx 重试只会放大账单。
 * **熔断有两档**：402（余额不足）长熔断（默认 1h）、401（Key 无效）同档；
   429 连续 3 次才熔断（默认 60s），单次 429 只退避——官方 QPS 抖动很常见。
+* **读页也走 API**：`read()` / `web_fetch` 按 `fetch_mode=api_first` 先试 `/v1/tools/fetch`，
+  拿到 Markdown 就标 `content_format=markdown` 并**跳过 ContentExtractor**（那是 HTML 抽取器）；
+  失败/空正文回落本地 httpx。两条路共用同一道「归一化 + 公网校验」闸门，
+  私网与带凭据 URL 在发出前就被拒。已读集合按「服务成功」登记，与走哪条路无关。
+* **研究模式默认 operators**：`research()` 不再并发 4 条变体，而是把 mode 展开成 1 条带
+  `site:` / `lang:` / `after:` 的查询（显式 `sites` 整体替换默认站点集；显式 `after` 覆盖
+  news 的 30 天窗）。这是「按请求计费」的直接对策；`variants` 仍保留用于对照与排障。
 * **状态在进程级**：`SearchApiRuntime` 持有 client / 令牌桶 / 熔断 / 预算；
   引擎实例是每次查询新建的（`SearchSession` 每次 new），状态若挂在实例上会归零。
   测试要 `deepseek_api.reset_runtime()` 或自建 runtime 注入 `httpx.MockTransport`。
@@ -643,6 +650,8 @@ flowchart TD
 | `_cost_recorder / _notifier` | 装配期 `set_cost_recorder` / `set_notifier` 注入 | 无（进程级） | 未注入时：只记 debug / warning，不影响搜索 |
 
 ## 易错点
+
+* **配置热重载**：`WebSearchReloadConsumer`（`config_paths=("web_search","env")`）在重载时调 `deepseek_api.configure` 并刷新 `config_section` 活配置；工具面下一轮调用即用新配置，`web_search` 从「需重启」升级为「运行期生效」。
 
 * **"内容类失败不重试"只对引擎内部成立**：`SearchManager.search` 的重试与失败类型无关，
   所以 Bing 内容类失败实际会打 2 次请求；结构类失败叠加引擎内的 `structural_retry`

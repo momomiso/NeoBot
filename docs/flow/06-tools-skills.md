@@ -9,7 +9,7 @@ covers:
   - app/src/neobot_app/runtime/sandbox_maintenance.py
   - packages/chat/src/neobot_chat/skills/
 verified_against: 802eb41
-verified_hash: dd8b02994f0f
+verified_hash: 02c4fb57f7fc
 ---
 
 # 06 工具运行时与技能：注册 · native/PTC · 管理员凭据 · 沙箱裁决 · 维护 Agent
@@ -580,6 +580,12 @@ CLI 侧（`cli.py:558`）有同构的一份循环，两条路径共用同一套 
 | SandboxLock 持有者 | 无调用点 | 无 | 当前不参与任何裁决，不可依赖 |
 
 ## 易错点
+
+* `WebTools(web_search_config=...)` 现在接受 **callable**（装配期传 `config_section.current_config`）：`engines` / `fetch_mode` / `preview_pages_limit` 每次调用现取，配置重载后无需重建工具面；显式传 dict 的快照语义仍保留（测试用）。
+
+* `web_search` 新增 `sites`/`lang`/`after`/`before`/`need_content` 参数（由 `WebTools._operator_args` 校验后直通 session，不用自己拼运算符）；`need_content` 只转发给签名支持的引擎，bing/DDG 不受影响。
+
+* `web_fetch` 现在是 `api_first`：先 `POST /v1/tools/fetch` 拿 Markdown，失败或空正文才回落原有的「DNS 固定 + 跨源重定向拦截」本地抓取；私网与带凭据 URL 在发出前就被 `_pinned_url` 拒掉。点
 
 * 主 Agent 的 `WebTools` 现在通过 `AgentToolRuntime(web_search_config=...)` 接住 `[web_search]`（此前 `WebTools()` 不带参数，engines 改了不生效）；`web_search` 的会话参数由 `web_search.config_section.session_kwargs` 过滤后传入。
 

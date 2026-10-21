@@ -303,10 +303,24 @@ def set_notifier(notifier: Callable[[str], Any] | None) -> None:
 
 
 def configure(section: Any = None, *, api_key: str | None = None) -> ApiConfig:
-    """bootstrap 期调用一次：把 [web_search.api] 段变成进程级配置。"""
-    global _CONFIG, _RUNTIME
+    """应用 [web_search.api] 段：启动装配与配置热重载都走这里。
+
+    旧 runtime 里的连接不会立刻断开：这里无法 await，改成「有事件循环就排一个
+    关闭任务」，避免反复重载时把文件描述符攒在旧 client 上。
+    """
+    global _CONFIG, _RUNTIME, _ENGINE
+    old_runtime = _RUNTIME
     _CONFIG = ApiConfig.from_section(section, api_key=api_key)
     _RUNTIME = None
+    _ENGINE = None
+    if old_runtime is not None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+        else:
+            with contextlib.suppress(RuntimeError):
+                loop.create_task(old_runtime.aclose())
     return _CONFIG
 
 
@@ -315,9 +329,10 @@ def get_config() -> ApiConfig:
 
 
 def reset_runtime() -> None:
-    """测试用：丢掉进程级运行时（含共享客户端）。"""
-    global _RUNTIME
+    """测试用：丢掉进程级运行时（含共享客户端）与复用的引擎。"""
+    global _RUNTIME, _ENGINE
     _RUNTIME = None
+    _ENGINE = None
 
 
 def get_runtime() -> SearchApiRuntime:
@@ -486,12 +501,21 @@ class DeepSeekSearchEngine(BaseSearchEngine):
     ) -> None:
         if runtime is not None:
             self._runtime = runtime
+        elif config is not None:
+            # 测试/独立用途：自带 runtime（可注入 transport 与假时钟）
+            self._runtime = SearchApiRuntime(config, transport=transport, clock=clock, sleeper=sleeper)
         else:
-            self._runtime = SearchApiRuntime(config or _CONFIG, transport=transport, clock=clock, sleeper=sleeper)
+            # 生产路径：必须复用进程级 runtime。get_engine() 每次查询都会新建引擎实例，
+            # 若这里也新建 runtime，令牌桶/熔断/预算会随每次搜索归零 —— 5 QPS 与日上限形同虚设。
+            self._runtime = get_runtime()
 
     @property
     def config(self) -> ApiConfig:
         return self._runtime.config
+
+    @property
+    def runtime(self) -> SearchApiRuntime:
+        return self._runtime
 
     @property
     def calls(self) -> int:
@@ -671,6 +695,18 @@ class DeepSeekSearchEngine(BaseSearchEngine):
             "high_authority": report.signals.get("high_authority", 0),
         }
         signals: dict[str, Any] = {"validation": report.signals, "api": api_signals}
+        # 只记「成功且计费」的一次请求，作为账单对账与线上排障的锚点。
+        # 不含查询正文（隐私），只留长度、条数与金额。
+        logger.info(
+            "搜索 API 成功",
+            query_chars=len(query),
+            results=len(results),
+            billed=api_signals["billed"],
+            cost_cny=api_signals["cost_cny"],
+            attempts=attempts,
+            degraded=bool(report.signals.get("degraded")),
+            low_rerank=api_signals["low_rerank"],
+        )
         if not report.valid:
             codes = report.signals.get("codes") or []
             signals["failure"] = (
@@ -751,8 +787,31 @@ class DeepSeekSearchEngine(BaseSearchEngine):
             return FetchOutcome(ok=False, url=target, error="正文为空", status=200)
         runtime.breaker.record_success()
         await _record_cost(cfg.cost_per_request)
+        logger.info(
+            "抓取 API 成功",
+            host=host_of(target),
+            chars=len(content),
+            cost_cny=round(cfg.cost_per_request, 6),
+        )
         return FetchOutcome(ok=True, url=target, title=str((payload or {}).get("title") or ""),
                             content=content, status=200)
+
+
+_ENGINE: DeepSeekSearchEngine | None = None
+
+
+def shared_engine() -> DeepSeekSearchEngine:
+    """进程级共享引擎（读页路径用；与 get_runtime() 绑定，配置重置后自动重建）。"""
+    global _ENGINE
+    runtime = get_runtime()
+    if _ENGINE is None or _ENGINE.runtime is not runtime:
+        _ENGINE = DeepSeekSearchEngine(runtime=runtime)
+    return _ENGINE
+
+
+async def fetch_page(url: str) -> FetchOutcome:
+    """读页入口：走 /v1/tools/fetch。失败只返回 ok=False，由调用方回落本地抓取。"""
+    return await shared_engine().fetch(url)
 
 
 #: 注册进统一引擎表；engine.get_engine 对未知名字会惰性 import 本模块。

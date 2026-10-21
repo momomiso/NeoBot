@@ -115,6 +115,60 @@ async def test_05_fetch_returns_markdown(engine: DeepSeekSearchEngine) -> None:
     assert "search" in outcome.content.lower()
 
 
+async def test_07_session_read_uses_fetch_api() -> None:
+    """M3 接线：SearchSession.read() 走 Fetch API，正文标 markdown 并跳过 HTML 抽取器。"""
+    from neobot_app.web_search import deepseek_api
+    from neobot_app.web_search.session import SearchSession
+
+    load_env()  # 没走 engine fixture，这里要自己把 app/.env 读进环境
+    key = resolve_api_key("DeepSeekSearch_APIKey")
+    if not key:
+        pytest.skip("未配置 DeepSeekSearch_APIKey / DeepSeek_APIKey")
+    deepseek_api.configure(WebSearchApiConfig(), api_key=key)  # 等价于启动期 apply_web_search_config
+
+    session = SearchSession(engines=["deepseek"], fetch_mode="api_first")
+    try:
+        response = await session.search("DeepSeek API 文档", num_results=3)
+        assert response.results, response.error
+        first = response.results[0]
+        print(f"\n[read] target={first.url[:100]}")
+
+        returned = await session.read([first.index])
+        read = returned[0]
+        print(f"[read] fetched={read.content_fetched} format={read.content_format} "
+              f"len={len(read.content or '')}")
+        assert read.content_fetched is True
+        assert read.content_format == "markdown"
+        assert len(read.content or "") > 200
+    finally:
+        await session.aclose()
+        deepseek_api.reset_runtime()
+
+
+async def test_08_research_operators_send_one_query() -> None:
+    """M4：research(mode=...) 在 operators 策略下只发 1 条查询（真机 1 次请求 ≈ ¥0.005）。"""
+    from neobot_app.web_search import deepseek_api
+    from neobot_app.web_search.session import SearchSession
+
+    load_env()
+    key = resolve_api_key("DeepSeekSearch_APIKey")
+    if not key:
+        pytest.skip("未配置 DeepSeekSearch_APIKey / DeepSeek_APIKey")
+    deepseek_api.configure(WebSearchApiConfig(), api_key=key)
+
+    session = SearchSession(engines=["deepseek"], research_strategy="operators")
+    try:
+        response = await session.research("DeepSeek API 文档", modes="official", num_results=5)
+        assert response.success, response.error
+        round_label = session.rounds[-1].query
+        print(f"\n[research] label={round_label} results={len(response.results)}")
+        assert "operators×1" in round_label
+        assert response.results
+    finally:
+        await session.aclose()
+        deepseek_api.reset_runtime()
+
+
 async def test_06_cost_and_budget_accounting(engine: DeepSeekSearchEngine) -> None:
     """顺带确认两次成功请求后：预算计数 +1、单价换算正确。"""
     before = engine.calls

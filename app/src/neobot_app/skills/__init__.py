@@ -59,11 +59,17 @@ DEFAULT_EAGER_TOOL_SKILLS = frozenset(
 )
 
 
-def _web_search_section(config: Any) -> dict[str, Any]:
-    """读取 [web_search] 段供 agent 工具使用（缺段时返回空 dict）。"""
-    from neobot_app.web_search.config_section import section_to_config_dict
+def _web_search_section(config: Any) -> Any:
+    """给 agent 工具返回一个「活配置」提供者，而不是构造期快照。
 
-    return section_to_config_dict(getattr(config, "web_search", None))
+    工具面（WebTools）在启动时只构造一次；若传快照，改 engines / fetch_mode
+    必须重启。这里返回 callable：每次调用现取活配置，拿不到时回退到本进程的
+    配置段（测试里没走 bootstrap 也能用）。
+    """
+    from neobot_app.web_search.config_section import current_config, section_to_config_dict
+
+    fallback = section_to_config_dict(getattr(config, "web_search", None))
+    return lambda: current_config() or fallback
 
 
 def build_all_skills(

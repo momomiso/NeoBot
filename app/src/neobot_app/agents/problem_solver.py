@@ -723,6 +723,8 @@ class ProblemSolverToolExecutor(ToolExecutor):
             browser_fallback=ws.get("browser_fallback", True),
             browser_timeout_seconds=ws.get("browser_timeout_seconds", 8.0),
             engine_budgets=ws.get("engine_budgets"),
+            fetch_mode=ws.get("fetch_mode"),
+            research_strategy=ws.get("research_strategy"),
         )
         self._sandbox = sandbox_service
         self._vision_provider = vision_provider
