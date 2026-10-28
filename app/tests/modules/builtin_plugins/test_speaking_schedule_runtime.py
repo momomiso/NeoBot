@@ -122,3 +122,63 @@ async def test_real_reload_recovers_config_and_mute(runtime):
     )
     assert recovered.clock.latest is not None
     assert consumer.clock.latest == latest
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+async def test_real_snapshot_advertises_config_hot_reload(runtime, enabled):
+    rt, _, _ = runtime
+    if enabled:
+        assert (await rt.set_enabled("speaking_schedule", True)).ok
+    snapshot = rt.control.get("speaking_schedule")
+    assert snapshot.enabled is enabled
+    assert snapshot.config_hot_reload is True
+
+
+async def test_dashboard_save_applies_consumer_without_reloading(runtime, monkeypatch):
+    import importlib
+    import json
+    from unittest.mock import AsyncMock
+
+    from neobot_app.builtin_plugins.dashboard.api import DashboardApi
+    from neobot_contracts.models import ConversationRef
+    from neobot_contracts.ports.logging import NullLogger
+
+    rt, policy, commands = runtime
+    assert (await rt.set_enabled("speaking_schedule", True)).ok
+    consumer = rt.control.config_consumer("speaking_schedule")
+    original_command = commands.get("作息")
+    monkeypatch.setattr(
+        importlib.import_module(type(consumer).__module__),
+        "utc_now",
+        lambda: datetime(2026, 11, 2, 12, tzinfo=timezone.utc),
+    )
+    reload = AsyncMock(side_effect=AssertionError("consumer must apply without reloading"))
+    monkeypatch.setattr(rt.control, "reload", reload)
+    api = DashboardApi(
+        console=SimpleNamespace(
+            plugin_control=rt.control, manage_plugins=True, allow_remote_manage=True, logger=NullLogger()
+        )
+    )
+    request = SimpleNamespace(match_info={"name": "speaking_schedule"})
+    before = json.loads((await api.plugin_config_get(request)).text)
+    assert policy.evaluate(ConversationRef("group", "43")).allowed
+    config = {
+        "timezone": "UTC",
+        "windows": [dict(weekdays=[1], start="09:00", end="10:00", next_day=False)],
+        "overrides": [dict(kind="group", id="42", windows=[])],
+    }
+    request.can_read_body = True
+    request.json = AsyncMock(return_value={"config": config, "revision": before["revision"], "reload": True})
+    response = await api.plugin_config_save(request)
+    saved = json.loads(response.text)
+    assert response.status == 200 and saved["ok"] and saved["applied"], saved
+    assert saved["changes"]["hot_reload_count"] == 3
+    assert saved["changes"]["needs_restart_count"] == 0
+    assert consumer.config.model_dump() == config == consumer.ctx.config
+    assert rt.control.plugin_config_values("speaking_schedule") == config
+    assert rt.control.config_consumer("speaking_schedule") is consumer
+    assert commands.get("作息") is original_command
+    assert not policy.evaluate(ConversationRef("group", "43")).allowed
+    assert policy.evaluate(ConversationRef("group", "42")).allowed
+    reload.assert_not_awaited()
+    assert saved["config_hot_reload"] is True
