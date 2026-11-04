@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, Mapping
@@ -16,24 +17,27 @@ from neobot_app.statistics.billing import (
     build_billing_context,
     builtin_cost,
 )
+from neobot_app.statistics.billing_parts.core import uncached_input_tokens
 
 CURRENT_USAGE_MODULE: ContextVar[str] = ContextVar("current_usage_module", default="")
 CURRENT_CONVERSATION_KIND: ContextVar[str] = ContextVar("current_conversation_kind", default="")
 CURRENT_CONVERSATION_ID: ContextVar[str] = ContextVar("current_conversation_id", default="")
 
-_VALID_MODULES = frozenset({
-    "reply_agent",
-    "reply_common",
-    "bilibili",
-    "agent:memory",
-    "agent:chat_interaction",
-    "agent:image_parse",
-    "agent:willingness",
-    "agent:scheduled_task",
-    "agent:problem_solver",
-    "agent:self_heal",
-    "memory_compaction",
-})
+_VALID_MODULES = frozenset(
+    {
+        "reply_agent",
+        "reply_common",
+        "bilibili",
+        "agent:memory",
+        "agent:chat_interaction",
+        "agent:image_parse",
+        "agent:willingness",
+        "agent:scheduled_task",
+        "agent:problem_solver",
+        "agent:self_heal",
+        "memory_compaction",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,6 +146,11 @@ class UsageTracker:
         import datetime as _dt
 
         occurred_at = _dt.datetime.now(_dt.timezone.utc)
+        rates = {
+            "cache_hit": entry.pricing.cache_hit_price_per_mtokens,
+            "cache_miss": entry.pricing.input_price_per_mtokens,
+            "output": entry.pricing.output_price_per_mtokens,
+        }
         fallback = builtin_cost(
             input_tokens=input_tokens,
             output_tokens=output_tokens,
@@ -185,6 +194,18 @@ class UsageTracker:
             source = outcome.source
             detail = outcome.detail_json
             elapsed_ms = outcome.elapsed_ms
+
+        cache_miss_tokens = uncached_input_tokens(input_tokens, cache_hit_tokens, cache_miss_tokens)
+        counts = {"cache_hit": cache_hit_tokens, "cache_miss": cache_miss_tokens, "output": output_tokens}
+        has_rate = any(rate > 0 and (counts[name] > 0 or not any(counts.values())) for name, rate in rates.items())
+        if cost == 0 and not source.startswith("script:") and not has_rate:
+            explanation = json.loads(detail) if detail else {}
+            explanation.update(note=f"模型 {entry.key} 未配置有效单价", fallback_source=source)
+            detail = json.dumps(explanation, ensure_ascii=False)
+            source = "unpriced"
+        elif source == SOURCE_BUILTIN:
+            components = {name: count * rates[name] / 1_000_000 for name, count in counts.items()}
+            detail = json.dumps({"components": components})
 
         record_obj = ModelUsageRecord(
             module_name=module,

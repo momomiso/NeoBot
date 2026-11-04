@@ -14,6 +14,7 @@ export interface UsageRecordItem {
   cost_source?: string;
   cost_source_kind?: 'builtin' | 'script' | 'fallback' | string;
   negative?: boolean;
+  unverified_zero?: boolean;
   cost_detail?: { components?: Record<string, number>; note?: string; error?: string; raw?: string } | null;
 }
 
@@ -26,6 +27,9 @@ export interface UsageRecordsPayload {
 
 /** 用量 /api/stats/usage 与 /api/series/usage */
 export interface UsageTotals {
+  cache_hit_tokens?: number;
+  unpriced_calls?: number;
+  unverified_zero_calls?: number;
   calls?: number;
   input_tokens?: number;
   output_tokens?: number;

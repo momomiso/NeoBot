@@ -313,3 +313,39 @@ describe('Usage 用量页悬停提示', () => {
     expect(screen.getByText('用量数据库暂不可用')).toBeInTheDocument();
   });
 });
+
+it('区分未计价与小额费用，并显示最近调用的缓存用量', async () => {
+  seriesUsage.mockResolvedValue({
+    ok: true,
+    data: { ...PAYLOAD, totals: { ...PAYLOAD.totals, cost_cny: 0.0008, unpriced_calls: 1 } },
+    error: null,
+    status: 200,
+  });
+  usageRecords.mockResolvedValue({
+    ok: true,
+    data: {
+      items: [
+        {
+          module: 'agent:memory',
+          model_name: 'flash',
+          input_tokens: 1200,
+          output_tokens: 3,
+          cache_hit_tokens: 900,
+          cost_cny: 0,
+          cost_source: 'unpriced',
+        },
+      ],
+    },
+    error: null,
+    status: 200,
+  });
+  render(<Usage />);
+  expect(await screen.findByText('¥0.0008', { selector: 'dd' })).toBeInTheDocument();
+  expect(screen.getByText(/1 次未计价/)).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: '最近调用' }));
+  const table = screen.getByRole('region', { name: '最近调用明细' });
+  expect(within(table).getByText('档案总结')).toBeInTheDocument();
+  expect(within(table).getByText('1,200')).toBeInTheDocument();
+  expect(within(table).getByText('900')).toBeInTheDocument();
+  expect(within(table).getByText('未配置价格')).toBeInTheDocument();
+});
