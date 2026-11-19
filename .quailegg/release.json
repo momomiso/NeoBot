@@ -1,10 +1,10 @@
 {
   "schema_version": 1,
-  "version": "2.1.0-a14",
-  "created_at": "2026-11-14T10:34:36.532338487Z",
+  "version": "2.1.0-a15",
+  "created_at": "2026-11-19T03:49:25.881905318Z",
   "mode": "pr",
   "channel": "alpha",
-  "fingerprint": "sha256:237d49898ec996f89ab5551efeb471c6590973c0dc2d1fa20b2787ea7e035eab",
+  "fingerprint": "sha256:a7f1a8775cfa10ad06297ea54c539d254d7aa35a465e4e5a57ffcb7819a27b2f",
   "repo": {
     "host": "github.com",
     "owner": "SuperQuail",
@@ -18,95 +18,95 @@
       "uv run pytest --strict-markers -m \"not browser and not network and not slow and not llm\""
     ],
     "skipped": false,
-    "at": "2026-11-14T10:34:36.532338977Z"
+    "at": "2026-11-19T03:49:25.881905698Z"
   },
   "packages": [
     {
       "name": "python@neobot",
       "path": ".",
       "resolver": "python",
-      "current": "2.1.0-a13",
-      "next": "2.1.0-a14",
+      "current": "2.1.0-a14",
+      "next": "2.1.0-a15",
       "bump": "minor",
-      "tag": "v2.1.0a14",
+      "tag": "v2.1.0a15",
       "publish": false
     },
     {
       "name": "python@neobot-app",
       "path": "app",
       "resolver": "python",
-      "current": "2.1.0-a13",
-      "next": "2.1.0-a14",
+      "current": "2.1.0-a14",
+      "next": "2.1.0-a15",
       "bump": "minor",
-      "tag": "v2.1.0a14",
+      "tag": "v2.1.0a15",
       "publish": true
     },
     {
       "name": "python@neobot-contracts",
       "path": "packages/contracts",
       "resolver": "python",
-      "current": "2.1.0-a13",
-      "next": "2.1.0-a14",
+      "current": "2.1.0-a14",
+      "next": "2.1.0-a15",
       "bump": "minor",
-      "tag": "v2.1.0a14",
+      "tag": "v2.1.0a15",
       "publish": true
     },
     {
       "name": "python@neobot-adapter",
       "path": "packages/adapter",
       "resolver": "python",
-      "current": "2.1.0-a13",
-      "next": "2.1.0-a14",
+      "current": "2.1.0-a14",
+      "next": "2.1.0-a15",
       "bump": "minor",
-      "tag": "v2.1.0a14",
+      "tag": "v2.1.0a15",
       "publish": true
     },
     {
       "name": "python@neobot-chat",
       "path": "packages/chat",
       "resolver": "python",
-      "current": "2.1.0-a13",
-      "next": "2.1.0-a14",
+      "current": "2.1.0-a14",
+      "next": "2.1.0-a15",
       "bump": "minor",
-      "tag": "v2.1.0a14",
+      "tag": "v2.1.0a15",
       "publish": true
     },
     {
       "name": "python@neobot-memory",
       "path": "packages/memory",
       "resolver": "python",
-      "current": "2.1.0-a13",
-      "next": "2.1.0-a14",
+      "current": "2.1.0-a14",
+      "next": "2.1.0-a15",
       "bump": "minor",
-      "tag": "v2.1.0a14",
+      "tag": "v2.1.0a15",
       "publish": true
     },
     {
       "name": "python@neobot-modloader",
       "path": "packages/modloader",
       "resolver": "python",
-      "current": "2.1.0-a13",
-      "next": "2.1.0-a14",
+      "current": "2.1.0-a14",
+      "next": "2.1.0-a15",
       "bump": "minor",
-      "tag": "v2.1.0a14",
+      "tag": "v2.1.0a15",
       "publish": true
     },
     {
       "name": "python@neobot-storage",
       "path": "packages/storage",
       "resolver": "python",
-      "current": "2.1.0-a13",
-      "next": "2.1.0-a14",
+      "current": "2.1.0-a14",
+      "next": "2.1.0-a15",
       "bump": "minor",
-      "tag": "v2.1.0a14",
+      "tag": "v2.1.0a15",
       "publish": true
     }
   ],
   "releases": [
     {
-      "version": "2.1.0-a14",
-      "tag": "v2.1.0a14",
-      "previous_tag": "v2.1.0a13",
+      "version": "2.1.0-a15",
+      "tag": "v2.1.0a15",
+      "previous_tag": "v2.1.0a14",
       "packages": [
         "python@neobot",
         "python@neobot-adapter",
@@ -1219,6 +1219,20 @@
       "author": "Tang-Tian-dev"
     },
     {
+      "file": ".changes/plugin-service-dependencies.md",
+      "type": "feat",
+      "scope": "modloader",
+      "bump": "minor",
+      "packages": [
+        "python@neobot-app",
+        "python@neobot-modloader"
+      ],
+      "body": "支持插件声明提供、必需与可选服务，统一检查服务依赖并联动插件生命周期。插件面板展示服务可用性、提供者和依赖诊断，提供依赖管理入口，沿用现有主题与配置操作流程。",
+      "commit": "69decc210016b8fc2038ef70490be220f162d4a8",
+      "commit_url": "https://github.com/SuperQuail/NeoBot/commit/69decc210016b8fc2038ef70490be220f162d4a8",
+      "author": "momomiso"
+    },
+    {
       "file": ".changes/prompt-assets-cot.md",
       "type": "feat",
       "bump": "minor",
@@ -1487,6 +1501,19 @@
       "author": "Tang-Tian-dev"
     },
     {
+      "file": ".changes/streaming-parser-panel.md",
+      "type": "fix",
+      "scope": "dashboard",
+      "bump": "patch",
+      "packages": [
+        "python@neobot-app"
+      ],
+      "body": "修复直播订阅页在暗色主题下的可读性，以及切回插件时搜索框被误填、内嵌页面高度不足的问题。",
+      "commit": "aa12f326390ab8a1c83b7668979225dce58dc914",
+      "commit_url": "https://github.com/SuperQuail/NeoBot/commit/aa12f326390ab8a1c83b7668979225dce58dc914",
+      "author": "momomiso"
+    },
+    {
       "file": ".changes/strip-duplicate-text.md",
       "type": "fix",
       "scope": "bot",
@@ -1550,6 +1577,7 @@
     ".changes/explicit-proactive-messages.md",
     ".changes/expose-official-action.md",
     ".changes/fix-at-prefix.md",
+    ".changes/fix-known-issues.md",
     ".changes/fix-minigame-checksum.md",
     ".changes/fix-minigame-migration.md",
     ".changes/fix-official-mention.md",
